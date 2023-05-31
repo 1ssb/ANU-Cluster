@@ -1,0 +1,93 @@
+<p>In your directory, import the <code>autojupyter.slurm</code> file. Then, in the remote <code>bashrc</code>, write the <code>porter</code> function:</p>
+
+<pre><code>function porter() {
+    # Bash function developed by Subhransu S. Bhattacharjee.
+
+    # Extract the allocated server from the log file
+    dir="/home/projects/Rudra_Generative_Robotics/"
+    log_files=($dir/*.log)
+    if [ ${#log_files[@]} -eq 1 ]; then
+        remote_host=$(sed -n '2p' "${log_files[0]}")
+    else
+        echo "Error: Found more than one .log file"
+        return 1
+    fi
+
+    # Wait until a browser command is found on line 20 of the log file
+    browser_command=""
+    while [[ ! $browser_command =~ http://[^[:space:]]+:8888/\?token=[^[:space:]]+ ]]; do
+        sleep 1
+        browser_command=$(sed -n '20p' "${log_files[0]}" | sed 's/^ *//')
+    done
+
+    # Extract the token from the browser command
+    token=$(echo $browser_command | grep -oP '(?<=token=)[^[:space:]]+')
+
+   if [ "$remote_host" = "server" ]; then
+    echo "---WISH-GRANTED-NOW-RUN-jweb-in-local-terminal---"
+    echo "----Use-this-token-for-the-browser----"
+    echo "$token"
+    else
+    echo "----Resources-Wished-for-failed-allocation--Go--Manual--"
+   fi
+}
+alias jrun='if [ ! -e *.log ]; then sbatch autojupyter.slurm; sleep 2; if [ $(ls *.log | wc -l) -eq 1 ]; then porter; fi; fi'</code></pre>
+
+<p>Replace <code>uid</code> and preferred <code>gpuserver</code> as needed.</p>
+
+<p>In the local machine, run <code>apt install xterm</code>. In your local machine <code>bashrc</code>, add:</p>
+
+<pre><code>jweb() {
+    ssh_command="ssh -L 8888:localhost:1729 server -J usxxxx@cluster1.cecs.anu.edu.au -fN"
+    eval "$ssh_command"
+    sleep 10
+    echo "---Opening Browser---Use-token---"
+    xterm -e "xdg-open http://localhost:8888/tree?; exec bash" &
+}</code></pre>
+
+<p>Save and source <code>bashrc</code> in both different terminals. That’s it. Run <code>jrun</code> in the remote terminal and wait for the wish to be granted. Go to the local terminal and run <code>jweb</code>.</p>
+
+<p>Additionally, you can add this to the remote <code>.bashrc_aliases</code>:</p>
+
+<pre><code>#!/bin/bash
+
+function deleter() {
+    # Delete the log file
+    find ../Rudra_Generative_Robotics/ -type f -name "*.log" -delete
+    # Check if there is any log file in the given directory
+    if find ../Rudra_Generative_Robotics/ -type f -name "*.log" | grep -q .; then
+        # If yes, echo error message
+        echo "Error occurred!"
+        sleep 10s
+        return 1
+    fi
+    echo "--Log Deleted and Job cleared--Resources-Retrieved--"
+    sleep 1s
+    clear
+}
+
+canceler() {
+    # Set the username and job name
+    local username="uxxxx"
+    local jobname="jupyter-tensorflow"
+
+    # Find all job IDs for the specified user and job name
+    local jobids=$(squeue -u $username -n $jobname -h -o %i)
+
+    # Cancel all jobs with the specified job IDs
+    for jobid in $jobids; do
+        scancel $jobid
+    done
+    clear
+}
+
+function dlog() {
+    deleter
+    canceler
+}</code></pre>
+
+<p><strong>DISCLAIMER: DO NOT EVEN BY MISTAKE PUT THIS IN THE BASHRC FILE. IT WILL FREEZE EVERYTHING.</strong></p>
+
+<p>Now with <code>dlog</code>, you may clear your past and run <code>jrun</code> to get new resources and then run <code>jweb</code> on your local terminal. Try it out and let me know if anything goes wrong at Subhransu.Bhattacharjee@anu.edu.au. Remember you are still port forwarding; it’s just automated to match your needs. This method will obviously break if you ask for resources available in multiple GPU servers, in which case you can create a dictionary and use an exit code for in the print file and have <code>jweb</code> run using that code i.e., a key-value pair for both the porter function and jweb as well using the server name and exit code.</p>
+
+<p>To clear xterm sessions on your device terminal, run: <code>pkill xterm</code> and check whether anything is still on as: <code>pgrep xterm</code>.</p>
