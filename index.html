@@ -7,7 +7,7 @@
     # Bash function developed by Subhransu S. Bhattacharjee.
 
     # Extract the allocated server from the log file
-    dir="/home/projects/Rudra_Generative_Robotics/"
+    dir="/home/projects/your_directory/"
     log_files=($dir/*.log)
     if [ ${#log_files[@]} -eq 1 ]; then
         remote_host=$(sed -n '2p' "${log_files[0]}")
@@ -56,9 +56,9 @@ alias jrun='if [ ! -e *.log ]; then sbatch autojupyter.slurm; sleep 2; if [ $(ls
 
 function deleter() {
     # Delete the log file
-    find ../Rudra_Generative_Robotics/ -type f -name "*.log" -delete
+    find ../your_directory/ -type f -name "*.log" -delete
     # Check if there is any log file in the given directory
-    if find ../Rudra_Generative_Robotics/ -type f -name "*.log" | grep -q .; then
+    if find ../your_directory/ -type f -name "*.log" | grep -q .; then
         # If yes, echo error message
         echo "Error occurred!"
         sleep 10s
