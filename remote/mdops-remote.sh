@@ -113,11 +113,11 @@ usage() { # PATH -> "pct used_h limit_h source"
       line=$(lfs quota -q $kind "$mnt" 2>/dev/null | awk 'NF>=4{print $2, ($4>0?$4:$3)}' | head -1)
       set -- $line
       if [ -n "${2:-}" ] && [ "${2%\*}" -gt 0 ] 2>/dev/null; then
-        echo "$(( ${1%\*} * 100 / ${2%\*} )) $(( ${1%\*} / 1048576 ))G $(( ${2%\*} / 1048576 ))G lustre${kind%% *}"; return
+        echo "$(( ${1%\*} * 100 / ${2%\*} )) $(( ${1%\*} / 1048576 ))G $(( ${2%\*} / 1048576 ))G lustre${kind%% *} free=$(( (${2%\*} - ${1%\*}) / 1048576 ))G"; return
       fi
     done
   fi
-  df -P "$p" | awk 'NR==2{gsub("%","",$5); printf "%s %.0fG %.0fG df\n", $5, $3/1048576, $2/1048576}'
+  df -P "$p" | awk 'NR==2{gsub("%","",$5); printf "%s %.0fG %.0fG df free=%.0fG\n", $5, $3/1048576, $2/1048576, $4/1048576}'
 }
 
 # ---------- slurm submit ----------
@@ -128,7 +128,9 @@ run_slurm() { # NAME DIR ALLOW_DIRTY AGENT WORK_ROOT STOP_PCT SBATCH_ARGS... -- 
   [ -n "$work" ] || die "CLUSTER_WORK_ROOT not set in config/hosts.conf"
   command -v sbatch >/dev/null || die "sbatch not found on $(hostname -s)"
   dir=$(cd "$dir" 2>/dev/null && pwd) || die "no such dir: $2"
-  local u; u=$(usage "$work"); [ "${u%% *}" -lt "$stop" ] || die "storage at ${u%% *}% (stop at $stop%): $u — harvest+prune first"
+  local u fr minfree=${stop#*:}; stop=${stop%%:*}; [ "$minfree" = "$stop" ] && minfree=0; u=$(usage "$work"); fr=$(printf '%s' "$u" | sed -n 's/.*free=\([0-9]*\)G.*/\1/p')
+  [ "${u%% *}" -lt "$stop" ] || die "storage at ${u%% *}% (stop at $stop%): $u — harvest+prune first"
+  [ "${fr:-0}" -ge "$minfree" ] || die "only ${fr}G free on the work root (minimum ${minfree}G): $u — free space first (mtd census, then archive/prune with approval)"
   local id rd out; id=$(new_run_id cluster "$name"); rd="$STATE/runs/$id"; out="$work/runs/$id"
   git_prov "$dir" "$allow" "$rd"; mkdir -p "$rd" "$out"
   printf '%q ' "$@" > "$rd/cmd.txt"
