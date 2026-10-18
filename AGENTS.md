@@ -52,16 +52,22 @@ Routes are picked automatically, in this order:
 - cluster: through rudra (`md-cluster`), then other fallbacks (`md-cluster-lan`, `md-cluster-direct`).
 
 ## 2. Hard safety rules (no exceptions without the human saying so in chat)
-- **Never disrupt other agents or take over the computer.**
-  - No screen, keyboard, mouse or clipboard control.
-  - Never open, close or focus the human's apps.
+- **Ask the human before any delete or upload.** This covers:
+  - `prune --yes`, `clean caches --yes`, `archive --remove-original`;
+  - `stage --yes`, `agent-key authorize/revoke`, `link-rudra-cluster`;
+  - `git push`, and sending any file anywhere.
+
+  Ask in chat and wait for an explicit yes, then repeat the command with
+  `--approved "<their words + time>"`. The approval is written to the journal.
+  `mdops` refuses these actions without it.
+- **Never disrupt other agents.**
   - Never kill, attach to or signal processes, tmux sessions or jobs you did
     not start. `mdops cancel` only cancels runs recorded under your `MD_AGENT`.
   - Never release or steal another agent's lock.
-  - Never change network state (Tailscale, VPN) or system settings.
-  - Work only through `mdops`/`mtd`, on resources you started or have locked.
-    Cleanup and archiving take the `rudra-cleanup` lock and wait while runs
+  - Cleanup and archiving take the `rudra-cleanup` lock and wait while runs
     are active.
+  - Use the human's screen, keyboard or apps only when the human has granted
+    it in this session, and never in a way that interrupts work in progress.
 - **Never type or store passwords, OTPs or tokens.** If `doctor` says a host
   needs a login, stop and ask the human to run `mdops login <host>`.
 - **Login node:** agents may run only the commands that `mdops ssh cluster`
@@ -146,6 +152,7 @@ mdops runs [rudra|cluster] | mdops status RUN_ID | mdops cancel RUN_ID (own runs
 mdops quota | mdops census           storage usage (census = du inside a Slurm CPU job)
 mdops stage RUDRA_PATH [--name N] [--yes]       rudra -> cluster work/stage (resumable, retried)
 mdops harvest RUN_ID [--yes]                    cluster run -> rudra, verified, then prunable
+(any delete/upload by an agent also needs --approved "<human's words + time>")
 mdops prune [--yes]                             delete verified-harvested cluster run dirs only
 mdops clean scan | clean caches [--yes]         rudra disk report / clear caches
 mdops archive RUDRA_PATH [--yes] [--remove-original]

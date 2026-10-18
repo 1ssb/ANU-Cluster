@@ -101,6 +101,15 @@ login_guard() { # CMDSTRING -> 0 if allowed
     esac
   done; }
 
+
+# ---------- human approval gate: every delete or upload needs the human's explicit OK ----------
+# Agents ask in chat first, then pass the human's words: --approved "Subhransu, 18:05: yes, prune those 3 runs"
+APPROVED="${MD_APPROVED:-}"
+need_approval() { # ACTION-DESCRIPTION
+  [ "$AGENT" = human ] && [ -t 0 ] && return 0
+  [ -n "$APPROVED" ] || die "'$1' deletes or uploads data: ask the human in chat first, then repeat with --approved \"<their words + time>\""
+  remote rudra journal "$AGENT" "APPROVED by human ($APPROVED): $1" >/dev/null 2>&1 || printf -- '- %s [%s] APPROVED (%s): %s\n' "$(date -u +%FT%TZ)" "$AGENT" "$APPROVED" "$1" >> "$STATE/journal-offline.md"; }
+
 # ---------- commands ----------
 cmd_help() { sed -n '/^## Commands/,/^## /p' "$ROOT/AGENTS.md" | sed '$d'; }
 
@@ -231,7 +240,7 @@ cmd_stage() { # RUDRA_SRC [--name N] [--yes]   rudra canonical -> cluster work/s
   need_conf CLUSTER_WORK_ROOT; [ -n "$src" ] || die "mdops stage RUDRA_PATH [--name NAME] [--yes]"
   name=${name:-$(basename "$src")}
   local p; p=$(pct_of cluster "$CLUSTER_WORK_ROOT"); [ "${p:-100}" -lt "$CLUSTER_QUOTA_STOP_PCT" ] || die "cluster storage at ${p}% — prune first (mdops prune)"
-  local dest="md-cluster:$CLUSTER_WORK_ROOT/stage/$name/" n=-n; [ $yes = 1 ] && n=
+  local dest="md-cluster:$CLUSTER_WORK_ROOT/stage/$name/" n=-n; [ $yes = 1 ] && { need_approval "upload rudra:$src -> cluster stage/$name"; n=; }
   say "rudra:$src/  ->  $dest   $( [ $yes = 1 ] && echo REAL || echo 'DRY RUN (add --yes)')"
   rssh rudra "du -sh $(q "$src") 2>/dev/null; ssh -o BatchMode=yes md-cluster mkdir -p $(q "$CLUSTER_WORK_ROOT/stage/$name") && $(retry_rsync "$n" "$src/" "$dest")" \
     || die "stage failed (rudra->cluster key missing? run: mdops link-rudra-cluster)"; }
@@ -245,10 +254,11 @@ cmd_harvest() { # RUN_ID [--yes]   cluster work/runs/ID -> rudra data root (runs
     if [ "${diff:-1}" = 0 ]; then remote cluster mark-harvested "$CLUSTER_WORK_ROOT/runs/$id"; ok "harvested + verified; cluster copy now prunable"; else warn "verify found $diff differences; NOT marked harvested"; fi
   else say "(dry run — add --yes)"; fi; }
 
-cmd_prune() { need_conf CLUSTER_WORK_ROOT; remote cluster prune "$CLUSTER_WORK_ROOT" "$([ "$1" = --yes ] && echo 1 || echo 0)"; }
+cmd_prune() { need_conf CLUSTER_WORK_ROOT; [ "$1" = --yes ] && need_approval "delete harvested cluster run dirs"; remote cluster prune "$CLUSTER_WORK_ROOT" "$([ "$1" = --yes ] && echo 1 || echo 0)"; }
 
 cmd_link_rudra_cluster() { # give rudra its own key to the cluster so data moves rudra<->cluster directly
   need_conf CLUSTER_HOST CLUSTER_USER; [ "$1" = --yes ] || die "this adds a rudra-only key to the cluster's ~/.ssh/authorized_keys and a 'md-cluster' entry to rudra's ~/.ssh/config. Repeat with --yes."
+  need_approval "create rudra->cluster key and upload it to the cluster"
   local pub
   pub=$(rssh rudra 'set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; k=~/.ssh/id_ed25519_mdcluster
     [ -f $k ] || ssh-keygen -q -t ed25519 -N "" -C "rudra->cluster mdops" -f $k; cat $k.pub') || die "could not create key on rudra"
@@ -278,6 +288,7 @@ cmd_clean() { # scan | caches [--yes]  (rudra only; anything not a cache goes th
     caches)
       local n=1; [ "$2" = --yes ] && n=0
       if [ $n = 0 ]; then
+        need_approval "delete rudra caches (pip, conda pkgs, trash, thumbnails)"
         [ "$(remote rudra busy)" = 0 ] || die "runs are active on rudra (mdops runs rudra); cache cleanup waits so it cannot disrupt them"
         remote rudra lock acquire rudra-cleanup "$AGENT" 60 >/dev/null || die "another agent holds rudra-cleanup"
         trap 'remote rudra lock release rudra-cleanup "$AGENT" >/dev/null' EXIT
@@ -296,6 +307,7 @@ cmd_archive() { # RUDRA_PATH [--yes]: tar+zstd into RUDRA_ARCHIVE_ROOT, verify, 
   local src=$1 yes=0 rm=0; shift; while [ $# -gt 0 ]; do case "$1" in --yes) yes=1;; --remove-original) rm=1;; esac; shift; done
   need_conf RUDRA_ARCHIVE_ROOT; [ -n "$src" ] || die "mdops archive RUDRA_PATH [--yes] [--remove-original]"
   [ $yes = 1 ] || { rssh rudra "du -sh $(q "$src"); df -h $(q "$RUDRA_ARCHIVE_ROOT") | tail -1"; say "(dry run — add --yes to archive; originals are kept unless --remove-original AND verification passes)"; return; }
+  [ $rm = 1 ] && need_approval "archive and then DELETE original rudra:$src"
   remote rudra lock acquire rudra-cleanup "$AGENT" 240 >/dev/null || die "another agent holds rudra-cleanup"
   trap 'remote rudra lock release rudra-cleanup "$AGENT" >/dev/null' EXIT
   rssh rudra "set -e; src=\$(readlink -f $(q "$src")); name=\$(basename \"\$src\")-\$(date +%Y%m%d); dst=$(q "$RUDRA_ARCHIVE_ROOT")/\$name.tar.zst
@@ -435,6 +447,7 @@ cmd_agent_key() {
           ok "agent key: $k.pub" ;;
     authorize)
       [ "$2" = --yes ] || die "adds the agent key to rudra (jump to the cluster only) and the cluster (no forwarding). Repeat with --yes."
+      need_approval "upload agent public key to rudra + cluster authorized_keys"
       [ -f "$k.pub" ] || cmd_agent_key init; pub=$(cat "$k.pub"); need_conf CLUSTER_HOST
       rssh rudra "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qF $(q "$pub") ~/.ssh/authorized_keys || echo $(q "no-agent-forwarding,no-X11-forwarding,permitopen=\"$CLUSTER_HOST:$CLUSTER_PORT\" $pub") >> ~/.ssh/authorized_keys)" && ok "agent key authorised on rudra (may only jump to $CLUSTER_HOST)"
       rssh cluster "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qF $(q "$pub") ~/.ssh/authorized_keys || echo $(q "no-agent-forwarding,no-X11-forwarding,no-port-forwarding $pub") >> ~/.ssh/authorized_keys)" && ok "agent key authorised on cluster (no forwarding)" ;;
@@ -443,7 +456,7 @@ cmd_agent_key() {
          grep -qF "config.d/matterdoor.conf" "$HOME/.ssh/config" 2>/dev/null || { touch "$HOME/.ssh/config"; printf 'Include ~/.ssh/config.d/matterdoor.conf\n%s\n' "$(cat "$HOME/.ssh/config")" > "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"; }
          cmd_sshconfig ;;
     revoke) [ "$2" = --yes ] || die "removes the agent key from rudra and the cluster. Repeat with --yes."
-         pub=$(cut -d' ' -f2 "$k.pub")
+         need_approval "delete agent key from rudra + cluster authorized_keys"; pub=$(cut -d' ' -f2 "$k.pub")
          for h in rudra cluster; do rssh "$h" "f=~/.ssh/authorized_keys; [ -f \$f ] && grep -vF $(q "$pub") \$f > \$f.tmp; mv \$f.tmp \$f && chmod 600 \$f" && ok "revoked on $h"; done ;;
     *) [ -f "$k.pub" ] && say "agent key: $(cut -d' ' -f3 "$k.pub")" || say "no agent key (mdops agent-key init)"; [ -f "$HOME/.ssh/mdops_agent_ed25519" ] && say "in use by this environment" ;;
   esac; }
@@ -630,6 +643,9 @@ EOF
   say "Next: tell the lead agent 'discovery done' — it reviews the report and sets the storage plan."; }
 
 # ---------- dispatch ----------
+# pull a global --approved "..." out of the arguments
+_a=(); while [ $# -gt 0 ]; do if [ "$1" = --approved ]; then APPROVED=$2; shift 2; else _a+=("$1"); shift; fi; done
+set -- ${_a[@]+"${_a[@]}"}
 c=${1:-help}; shift 2>/dev/null
 case "$c" in
   help|-h|--help) cmd_help ;;
