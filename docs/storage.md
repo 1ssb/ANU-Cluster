@@ -24,8 +24,11 @@ inside the project's persistent root. `mtd setup` creates it with:
 ## Limits and modes
 - **Cluster writes.** Cluster writes refuse when the work root has less than
   `CLUSTER_MIN_FREE_GB` free (default 40) or is above `CLUSTER_QUOTA_STOP_PCT`
-  used (default 99). The percentage alone is meaningless on a shared 4.5 TB
-  volume that is already at 99%.
+  used (default 100, which means off). The percentage alone is meaningless
+  on a shared 4.5 TB volume that is already at 99%.
+- **Cleanup exception.** `mtd census` and `mtd env snapshot cluster` write
+  only kilobytes, so they still run down to 2 GB free. The cleanup that frees
+  space can never be locked out.
 - **Without rudra.** The canonical copy of small results is this Mac
   (`~/MatterDoor/data/runs/<id>`, never in git). Large data stays in the
   cluster group storage, recorded in the project registry.

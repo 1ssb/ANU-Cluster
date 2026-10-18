@@ -170,21 +170,20 @@ run_submit() { # NAME PROJECT_DIR SCRIPT GUARD ALLOW_DIRTY AGENT WORK "PCT:MINFR
   dir=$(cd "$dir" 2>/dev/null && pwd) || die "no such dir: $2"; [ -f "$dir/$script" ] || die "no job script $dir/$script (commit + push it, then: mtd sync cluster)"
   u=$(storage_gate "$work" "$stop") || exit 2
   id=$(new_run_id cluster "$name"); rd="$STATE/runs/$id"; out="$work/runs/$id"
-  git_prov "$dir" "$allow" "$rd"; mkdir -p "$rd" "$out"; cp "$dir/$script" "$rd/job.sbatch"; cp "$rd/job.sbatch" "$out/job.sbatch"
+  git_prov "$dir" "$allow" "$rd"; mkdir -p "$rd" "$out"; cp "$dir/$script" "$rd/job.sbatch"
   log=$(sed -n 's/^#SBATCH[[:space:]]\+\(--output=\|-o[[:space:]]*\)\([^[:space:]]*\).*/\2/p' "$dir/$script" | head -1)
   local envx=()   # the run's MD_* variables must reach the job; logs land in the run dir unless the script names its own
   grep -Eq '^#SBATCH[[:space:]]+--export' "$dir/$script" || envx+=(SBATCH_EXPORT=ALL)
   [ -n "$log" ] || envx+=("SBATCH_OUTPUT=$out/slurm-%j.log" "SBATCH_ERROR=$out/slurm-%j.log")
   { echo "run_id=$id"; echo "host=cluster"; echo "kind=gpu-submit"; echo "dir=$dir"; echo "script=$script"; echo "commit=$COMMIT"; echo "dirty=$DIRTY"; echo "agent=$agent"
     echo "job_spec=${MD_JOB:-}"; echo "out_dir=$out"; echo "submitted=$(now)"; } > "$rd/meta.env"
-  [ -f "$rd/dirty.patch" ] && cp "$rd/dirty.patch" "$out/"
   o=$(cd "$dir" && env MD_RUN_ID="$id" MD_RUN_DIR="$rd" MD_OUT_DIR="$out" MD_WORK="$work" MD_AGENT="$agent" MD_JOB="${MD_JOB:-}" \
         ${envx[@]+"${envx[@]}"} bash "$guard" --submit "$script" 2>&1); rc=$?
   printf '%s\n' "$o"
   jid=$(printf '%s' "$o" | sed -n 's/.*Submitted batch job \([0-9][0-9]*\).*/\1/p' | head -1)
   if [ "$rc" != 0 ] || [ -z "$jid" ]; then echo "submit=failed" >> "$rd/meta.env"; rmdir "$out" 2>/dev/null || true; die "guard refused or sbatch failed; nothing queued (record kept: $rd)"; fi
   [ -n "$log" ] && log=$(printf '%s' "$log" | sed "s/%j/$jid/g; s/%A/$jid/g; s/%x/${name}/g") || log="$out/slurm-$jid.log"
-  { echo "job=$jid"; echo "log=$log"; } >> "$rd/meta.env"; cp "$rd/meta.env" "$out/meta.env"
+  { echo "job=$jid"; echo "log=$log"; } >> "$rd/meta.env"; cp "$rd/meta.env" "$rd/job.sbatch" "$out/"; [ -f "$rd/dirty.patch" ] && cp "$rd/dirty.patch" "$out/"
   printf '%s\t%s\tgpu\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" cluster "$name" "$COMMIT" "$DIRTY" "$agent" "$(now)" "$jid" >> "$INDEX"
   echo "RUN $id"; echo "job: $jid"; echo "out: $out"; echo "log: $log"; echo "storage now: $u"
 }

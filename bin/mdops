@@ -199,6 +199,7 @@ cmd_submit() { # cluster/JOB.sh --job ID [--check] [--allow-dirty]: the project'
 
 cmd_census() { # sizes of the cluster roots, measured inside a Slurm CPU job (never on the login node)
   need_conf CLUSTER_WORK_ROOT
+  local CLUSTER_MIN_FREE_GB=2   # tiny output: the cleanup that frees space must never be locked out by the floor
   local roots=${*:-"$CLUSTER_GROUP_ROOT /home/group/rudra-shared"}
   SLURM_GRES=; cmd_run cluster --job job:census --dir "$CLUSTER_WORK_ROOT" --allow-dirty --no-gpu --time 01:00:00 --mem 4G --cpus 2 -- \
     bash -c "for r in $roots; do echo \"== \$r\"; du -sh --apparent-size \"\$r\"/* \"\$r\"/.[!.]* 2>/dev/null | sort -h | tail -60; done; df -h $roots; quota -s 2>/dev/null"; }
@@ -557,14 +558,14 @@ ho_put() { # BASE SUMMARY FILE -> upload, then commit on rudra if BASE is still 
 cmd_handoff() {
   local base ver
   case "${1:-show}" in
-    show) ho_fetch; case $? in 1) warn "rudra unreachable — showing cached handoff";; 2) say "(no handoff yet: mtd handoff init)"; return;; esac
+    show) ho_fetch; case $? in 1) warn "hub $(hub) unreachable — showing cached handoff";; 2) say "(no handoff yet: mtd handoff init)"; return;; esac
           cat "$HOFF/HANDOFF.md" 2>/dev/null ;;
-    init) ho_fetch; [ $? = 2 ] || die "a handoff already exists (or rudra is unreachable)"
+    init) ho_fetch; [ $? = 2 ] || die "a handoff already exists (or hub $(hub) is unreachable)"
           if [ -f "$CTRL/handoff/HANDOFF.md" ]; then cp "$CTRL/handoff/HANDOFF.md" "$HOFF/HANDOFF.md"   # project seed / mirror
           else sed "s/^_Single source/_Created $(date '+%Y-%m-%d %H:%M') by $AGENT. Single source/" "$ROOT/templates/HANDOFF.template.md" > "$HOFF/HANDOFF.md"; fi
           echo none > "$HOFF/.base"; ho_put none "initial handoff" "$HOFF/HANDOFF.md" ;;
     pull) remote "$(hub)" lock acquire handoff "$AGENT" "${2:-90}" || die "someone else is editing the handoff (see: mdops lock list)"
-          ho_fetch; case $? in 0) ;; 2) remote "$(hub)" lock release handoff "$AGENT" >/dev/null; die "no handoff yet: mtd handoff init";; *) remote "$(hub)" lock release handoff "$AGENT" >/dev/null; die "could not fetch the handoff from rudra";; esac
+          ho_fetch; case $? in 0) ;; 2) remote "$(hub)" lock release handoff "$AGENT" >/dev/null; die "no handoff yet: mtd handoff init";; *) remote "$(hub)" lock release handoff "$AGENT" >/dev/null; die "could not fetch the handoff from hub $(hub) (mtd hub status)";; esac
           say "Edit: $HOFF/HANDOFF.md   (base $(cat "$HOFF/.base"))"
           say "Then: mtd handoff push \"one-line summary of this session\"   (or: mtd handoff release)" ;;
     push) [ -n "$2" ] || die 'mtd handoff push "one-line summary"'; [ -f "$HOFF/.base" ] || die "pull first: mtd handoff pull"
@@ -593,7 +594,10 @@ cmd_brief() {
     e=$(epoch_of "${d%%|*}"); [ -n "$e" ] || continue; days=$(( (e - now) / 86400 )); label=${d#*|}
     say "- ${label//_/ }: ${d%%|*}  →  $days days left"
   done
-  local short=0; [ "$1" = --short ] && short=1
+  local short=0 mode; [ "$1" = --short ] && short=1
+  if [ "$(hub)" = cluster ]; then mode="CLUSTER-ONLY (hub=cluster): rudra steps wait; downloads on the Mac + mtd stage --from mac; GPU via mtd submit; mtd harvest --to mac; back with: mtd hub use rudra"
+  elif route rudra >/dev/null; then mode="normal (hub=rudra)"; else mode="rudra UNREACHABLE while hub=rudra -> mtd doctor; if it lasts: mtd hub use cluster"; fi
+  say "- mode: $mode"
   if [ -f "$CTRL/MISSION.md" ]; then
     say; say "## M. Mission ($CTRL/MISSION.md)"; [ $short = 1 ] && sed -n '/^## Mission/,/^## Deadlines/p' "$CTRL/MISSION.md" | sed -n '2,3p' || cat "$CTRL/MISSION.md"
     say; say "## G. Goals (control/registry/goals.yaml)"
@@ -601,10 +605,10 @@ cmd_brief() {
     say; say "## S. Research status (control/STATUS.md)"; [ $short = 1 ] && sed -n '/^## Red flags/,/^## Reviewer gaps/p' "$CTRL/STATUS.md" | grep -E '^[0-9]+\. ' | cut -c1-110 || cat "$CTRL/STATUS.md"
     say; say "## K. Knowledge graph"; "$(pyy)" "$CTRL/tools/kg_check.py" 2>&1 | head -$([ $short = 1 ] && echo 1 || echo 6)
   else say; say "## M. (no control plane found at $CTRL — run: mtd sync, or check WORKSPACE in $CONF)"; fi
-  say; say "## A. Open asks (things agents could not access)"; remote_ro "$(hub)" ask-list 2>/dev/null | sed 's/^/    /' || say "    (rudra unreachable)"
+  say; say "## A. Open asks (things agents could not access)"; remote_ro "$(hub)" ask-list 2>/dev/null | sed 's/^/    /' || say "    (hub $(hub) unreachable)"
   if [ $short = 1 ]; then
     say; say "## H. Handoff: next steps"; ho_fetch >/dev/null 2>&1; sed -n '/^## Next steps/,/^## Session log/p' "$HOFF/HANDOFF.md" 2>/dev/null | grep -E '^[0-9]+\. ' | cut -c1-140
-    say; say "## L. Levers: mtd check | sync | save REPO msg [paths] | push REPO --approved | backup | build paper | status | ask | handoff pull/push  (all one-line, self-verifying)"
+    say; say "## L. Levers: mtd check | sync [cluster] | save REPO msg [paths] | push REPO --approved | backup | build paper | status | ask | submit | harvest | hub | handoff pull/push  (all one-line, self-verifying)"
     return 0; fi
   say; say "## 1. Non-negotiable rules (full text: $ROOT/AGENTS.md; project rules: CLUSTER_PROJECT_ROOT/AGENTS.md)"
   sed -n '/^## 2\. /,/^## 3\. /p' "$ROOT/AGENTS.md" | sed '1d;$d'
@@ -614,11 +618,11 @@ cmd_brief() {
   say; say "## 3. Running work + locks"
   { remote_ro rudra runs 8; remote_ro cluster runs 8; } 2>/dev/null | sed 's/^/    /' || say "    (unreachable)"
   say; say "## 4. Recent journal (all agents)"
-  remote_ro "$(hub)" journal-tail 15 2>/dev/null | sed 's/^/    /' || { say "    (rudra unreachable; offline entries:)"; tail -n 10 "$STATE/journal-offline.md" 2>/dev/null; }
+  remote_ro "$(hub)" journal-tail 15 2>/dev/null | sed 's/^/    /' || { say "    (hub $(hub) unreachable; offline entries:)"; tail -n 10 "$STATE/journal-offline.md" 2>/dev/null; }
   say; say "## 5. Living handoff"
   ho_fetch; case $? in
-    0) say "_version $(awk '{print $2}' "$HOFF/.base") on rudra_"; cat "$HOFF/HANDOFF.md";;
-    1) say "_rudra unreachable — CACHED copy, may be stale_"; cat "$HOFF/HANDOFF.md" 2>/dev/null;;
+    0) say "_version $(awk '{print $2}' "$HOFF/.base") on hub $(hub)_"; cat "$HOFF/HANDOFF.md";;
+    1) say "_hub $(hub) unreachable — CACHED copy, may be stale_"; cat "$HOFF/HANDOFF.md" 2>/dev/null;;
     2) say "(none yet — create it: mtd handoff init)";;
   esac
   say; say "## 6. Your session protocol"
@@ -680,7 +684,15 @@ cmd_sync() { # fetch + fast-forward every workspace repo; never merges, never di
       git -C "$d" merge -q --ff-only '@{u}' 2>/dev/null || { fail "sync $r cannot fast-forward (local edits overlap) -> commit with mtd save, then mtd sync"; rc=1; continue; }
     elif [ "$behind" -gt 0 ]; then fail "sync $r diverged (ahead $ahead, behind $behind) -> git -C $d rebase @{u} (resolve) or ask the PI"; rc=1; continue; fi
     [ "$(git -C "$d" rev-list --count '@{u}..HEAD')" = "$ahead" ] && okl "sync $r $b $(git -C "$d" rev-parse --short HEAD) ahead=$ahead behind=0 dirty=$dirty"
-  done; return $rc; }
+  done
+  # the workspace manual is a generated copy of the portal templates: keep it current (a local edit is backed up, never lost)
+  local f n=0 bk="$WORKSPACE/scratch/manual-backups"
+  for f in AGENTS.md README.md CLAUDE.md; do [ -f "$ROOT/templates/workspace/$f" ] || continue
+    cmp -s "$ROOT/templates/workspace/$f" "$WORKSPACE/$f" && continue
+    [ -f "$WORKSPACE/$f" ] && { mkdir -p "$bk"; cp "$WORKSPACE/$f" "$bk/$f.$(date +%Y%m%d-%H%M%S)"; }
+    cp "$ROOT/templates/workspace/$f" "$WORKSPACE/$f" && n=$((n+1)); done
+  [ $n -gt 0 ] && okl "sync workspace manual refreshed ($n file(s); previous copies in scratch/manual-backups)"
+  return $rc; }
 
 cmd_save() { # REPO "message" [paths...]: commit locally (hooks enforce guards). No paths = tracked changes only.
   local d msg before n; d=$(repo_dir "$1") || die "save: unknown repo '$1' (one of: $WS_REPOS)"; msg=$2; shift 2 2>/dev/null
@@ -771,11 +783,13 @@ cmd_env() { # snapshot rudra | snapshot cluster | fetch cluster RUN_ID  -> contr
     "snapshot rudra") mkdir -p "$dest"; remote rudra env-snapshot | tar -C "$dest" -xf - || { fail "env rudra snapshot failed"; return 1; }
        n=$(ls "$dest"/*.yml 2>/dev/null | wc -l | tr -d ' '); [ -s "$dest/system.txt" ] && okl "env rudra $n envs -> control/envs/rudra (mtd save $PROJECT_REPO \"env snapshot rudra\" control/envs/rudra)" || fail "env rudra wrote nothing";;
     "snapshot cluster") need_conf CLUSTER_WORK_ROOT
-       local rs="$CLUSTER_WORK_ROOT/mdops-state/bin/mdops-remote.sh"
+       local rs="$CLUSTER_WORK_ROOT/mdops-state/bin/mdops-remote.sh" CLUSTER_MIN_FREE_GB=2   # kilobytes of output; never blocked by the floor
        rssh cluster "mkdir -p $(q "$CLUSTER_WORK_ROOT/mdops-state/bin") && cat > $(q "$rs")" < "$REMOTE" || { fail "env cannot copy helper to cluster"; return 1; }
-       cmd_run cluster --job job:env-snapshot --dir "$CLUSTER_WORK_ROOT" --allow-dirty --no-gpu --time 00:20:00 --mem 4G --cpus 2 -- \
-         bash -c "mkdir -p \$MD_OUT_DIR/envs && MD_STATE=$(q "$CLUSTER_WORK_ROOT/mdops-state") bash $(q "$rs") env-snapshot | tar -C \$MD_OUT_DIR/envs -xf -" | sed -n 's/^RUN /NOTE env cluster job run id /p'
-       echo "NOTE when it finishes: mtd env fetch cluster <run id>";;
+       local o rid; o=$( (cmd_run cluster --job job:env-snapshot --dir "$CLUSTER_WORK_ROOT" --allow-dirty --no-gpu --time 00:20:00 --mem 4G --cpus 2 -- \
+         bash -c "mkdir -p \$MD_OUT_DIR/envs && MD_STATE=$(q "$CLUSTER_WORK_ROOT/mdops-state") bash $(q "$rs") env-snapshot | tar -C \$MD_OUT_DIR/envs -xf -") 2>&1)
+       rid=$(printf '%s\n' "$o" | sed -n 's/^RUN //p')
+       if [ -n "$rid" ]; then okl "env cluster snapshot job $rid queued (when it finishes: mtd env fetch cluster $rid)"
+       else fail "env cluster snapshot not queued: $(printf '%s\n' "$o" | grep -v '^\[' | tail -1) -> fix, then: mtd env snapshot cluster"; fi;;
     "fetch cluster") need_conf CLUSTER_WORK_ROOT; [ -n "$3" ] || die "mtd env fetch cluster RUN_ID"; mkdir -p "$dest"
        rssh cluster "tar -C $(q "$CLUSTER_WORK_ROOT/runs/$3/envs") -cf - ." | tar -C "$dest" -xf - && okl "env cluster fetched -> control/envs/cluster" || fail "env fetch failed (job finished? mtd status $3)";;
     *) die "mtd env snapshot rudra|cluster | mtd env fetch cluster RUN_ID";;
@@ -793,7 +807,7 @@ cmd_ask() { # "what — why" | --list [--all] | --close N "resolution"
     --list) remote_ro "$(hub)" ask-list "$2" 2>/dev/null || cat "$STATE/asks-offline.tsv" 2>/dev/null ;;
     --close) [ "$AGENT" = human ] || die "only the PI closes asks"; remote "$(hub)" ask-close "$2" "$3" ;;
     ""|-h) die 'mtd ask "<what you cannot access> — <why you need it>"' ;;
-    *) remote "$(hub)" ask-add "$AGENT" "$*" 2>/dev/null || { printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/asks-offline.tsv"; okl "ask saved offline (rudra unreachable)"; }
+    *) remote "$(hub)" ask-add "$AGENT" "$*" 2>/dev/null || { printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/asks-offline.tsv"; okl "ask saved offline in state/asks-offline.tsv (hub $(hub) unreachable; tell the PI in chat)"; }
        echo "NOTE now ask the PI in chat as well; do not work around the missing access" ;;
   esac; }
 
@@ -831,7 +845,7 @@ cmd_setup() { # finish or repair the installation; PI at a terminal only. Works 
     ln -sfn "$out" "$STATE/discovery/latest"
   fi
   cmd_agent_key init >/dev/null; APPROVED="PI ran mtd setup $(date '+%F %T')"
-  cmd_agent_key authorize --yes 2>&1 | sed -E -n 's/^(PASS|OK) +/OK setup /p; s/^WARN/WARN setup/p'
+  ( c_grn=; c_yel=; c_red=; c_dim=; c_off=; cmd_agent_key authorize --yes ) 2>&1 | sed -E -n 's/^(PASS|OK) +/OK setup /p; s/^WARN/WARN setup/p'
   if [ $rud = 1 ]; then rssh rudra 'ssh -n -o BatchMode=yes -o ConnectTimeout=8 md-cluster true' >/dev/null 2>&1 && okl "setup rudra->cluster key already works" || { cmd_link_rudra_cluster --yes >/dev/null 2>&1 && okl "setup rudra->cluster key installed" || { fail "setup rudra->cluster key (cluster may refuse keys from rudra)"; rc=1; }; }; fi
   ho_fetch >/dev/null 2>&1; case $? in
     2) if cmd_handoff init >/dev/null 2>&1; then okl "setup handoff created on hub $(hub)"; else fail "setup handoff init"; rc=1; fi;;
@@ -867,18 +881,28 @@ EOF4
 cmd_hub() { # status | use cluster|rudra : where coordination state lives; the project works with or without rudra
   case "${1:-status}" in
     status) local h; h=$(hub); route "$h" >/dev/null && okl "hub $h reachable (state $(hub_state_for "$h"))" || fail "hub $h unreachable -> mtd hub use $([ "$h" = rudra ] && echo cluster || echo rudra)";;
-    use) local to=$2 from; from=$(hub); case "$to" in cluster|rudra) ;; *) die "mtd hub use cluster|rudra";; esac
+    use) local to=$2 from unreach=; from=$(hub); case "$to" in cluster|rudra) ;; *) die "mtd hub use cluster|rudra";; esac
       [ "$to" = "$from" ] && { okl "hub already $to"; return 0; }
       [ "$to" = cluster ] && need_conf CLUSTER_WORK_ROOT
       route "$to" >/dev/null || die "$to is unreachable too: mtd doctor"
       local fsp tsp; fsp=$(hub_state_for "$from"); tsp=$(hub_state_for "$to")
       if route "$from" >/dev/null; then
-        rssh "$from" "cd $fsp 2>/dev/null && tar -cf - \$(ls -d handoff journal.md requests.tsv 2>/dev/null)" | rssh "$to" "mkdir -p $tsp && cd $tsp && tar -xf -" \
-          && okl "hub state copied $from -> $to" || { fail "hub copy failed; nothing switched"; return 1; }
-      else echo "NOTE $from unreachable: $to is seeded from the project repo's handoff mirror and the offline journal"; fi
+        # merge, never overwrite: journal + asks are unioned; the destination's older handoff history is kept as handoff.before-<ts>
+        local merge='set -e; cd "$1"; rm -rf .incoming; mkdir .incoming; tar -C .incoming -xf -
+          for f in journal.md requests.tsv; do [ -f ".incoming/$f" ] || continue; cat "$f" ".incoming/$f" 2>/dev/null | awk '"'"'!seen[$0]++'"'"' > ".$f.m"; mv ".$f.m" "$f"; done
+          if [ -d .incoming/handoff ]; then [ -d handoff ] && mv handoff "handoff.before-$(date +%Y%m%d-%H%M%S)"; mv .incoming/handoff handoff; fi; rm -rf .incoming'
+        rssh "$from" "cd $fsp 2>/dev/null && tar -cf - \$(ls -d handoff journal.md requests.tsv 2>/dev/null)" | rssh "$to" "mkdir -p $tsp && bash -c $(q "$merge") _ $tsp" \
+          && okl "hub state merged $from -> $to (older handoff history on $to kept)" || { fail "hub copy failed; nothing switched"; return 1; }
+      else unreach=1; echo "NOTE $from unreachable: $to is seeded from the project repo's handoff mirror and the offline journal"; fi
       if grep -q '^MD_HUB=' "$CONF"; then sed -i.bak "s/^MD_HUB=.*/MD_HUB=$to/" "$CONF" && rm -f "$CONF.bak"; else printf '\nMD_HUB=%s\n' "$to" >> "$CONF"; fi
       MD_HUB=$to
-      ho_fetch >/dev/null 2>&1; [ $? = 2 ] && cmd_handoff init >/dev/null 2>&1 && okl "hub handoff seeded on $to from control/handoff"
+      ho_fetch >/dev/null 2>&1; case $? in
+        2) cmd_handoff init >/dev/null 2>&1 && okl "hub handoff seeded on $to from control/handoff";;
+        0) # an older handoff from a previous outage may sit on $to: the mirror on this Mac is the newest copy
+           if [ -n "$unreach" ] && [ -f "$CTRL/handoff/HANDOFF.md" ] && ! cmp -s "$CTRL/handoff/HANDOFF.md" "$HOFF/HANDOFF.md"; then
+             cp "$CTRL/handoff/HANDOFF.md" "$HOFF/.new" && ho_put "$(awk '{print $1}' "$HOFF/.base")" "re-seeded from the project mirror ($from offline at hub move)" "$HOFF/.new" >/dev/null \
+               && rm -f "$HOFF/.new" && ho_fetch >/dev/null 2>&1 && okl "hub handoff on $to brought up to date from control/handoff (older versions kept)"; fi;;
+      esac
       [ -s "$STATE/journal-offline.md" ] && rssh "$to" "mkdir -p $tsp && cat >> $tsp/journal.md" < "$STATE/journal-offline.md" && mv "$STATE/journal-offline.md" "$STATE/journal-offline.merged.$(date +%s)"
       cmd_journal "coordination hub moved $from -> $to" >/dev/null; okl "hub now $to (all agents on this Mac use it)";;
     *) die "mtd hub [status] | mtd hub use cluster|rudra";;
@@ -1003,7 +1027,7 @@ case "$c" in
   ssh) cmd_ssh "$@" ;;  open) cmd_open "$@" ;;  tunnel) cmd_tunnel "$@" ;;
   lock) cmd_lock "$@" ;;  journal) cmd_journal "$@" ;;
   run) cmd_run "$@" ;;  cancel) cmd_cancel "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
-  hub) cmd_hub "$@" ;;  setup) cmd_setup ;;  awake) cmd_awake "$@" ;;  check) cmd_check ;;  sync) cmd_sync ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
+  hub) cmd_hub "$@" ;;  setup) cmd_setup ;;  awake) cmd_awake "$@" ;;  check) cmd_check ;;  sync) cmd_sync "$@" ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
   build) cmd_build "$@" ;;  env) cmd_env "$@" ;;  ledger) cmd_ledger "$@" ;;  ask) cmd_ask "$@" ;;  resources) cmd_resources ;;
   profile) cmd_profile "$@" ;;  brief) cmd_brief "$@" ;;  handoff) cmd_handoff "$@" ;;  agent) cmd_agent "$@" ;;
   agent-key) cmd_agent_key "$@" ;;

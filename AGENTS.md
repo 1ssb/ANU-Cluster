@@ -95,7 +95,8 @@ Routes are picked automatically, in this order:
   dry-run output, then repeat with `--yes`.
 - **Storage limits:** `stage` and `run cluster` refuse once the cluster work
   root has less than `CLUSTER_MIN_FREE_GB` free (default 40) or is above
-  `CLUSTER_QUOTA_STOP_PCT` (default 99). Harvest and prune first.
+  `CLUSTER_QUOTA_STOP_PCT` (default 100, which means off). Harvest and prune
+  first. The census and environment snapshots still run down to 2 GB free.
 - **Without rudra:** `mtd hub use cluster` moves coordination to the cluster.
   Stage from the Mac (`--from mac`) and harvest to the Mac (`--to mac`).
 - **Reproducibility:** `mdops run` refuses a repo with uncommitted changes.

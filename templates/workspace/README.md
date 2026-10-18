@@ -19,6 +19,10 @@ and knows everything else from there.
   reach rudra or the cluster, so they work on files here and hand remote steps
   to a local session.
 
+`AGENTS.md`, `CLAUDE.md` and this README are copies of the portal's
+`templates/workspace/`. `mtd sync` refreshes them; it backs up a local edit
+to `scratch/manual-backups/`. Make lasting changes in the portal.
+
 ## What is where
 | folder | GitHub | what |
 |---|---|---|
