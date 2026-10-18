@@ -541,7 +541,7 @@ cmd_brief() {
   done
   local short=0; [ "$1" = --short ] && short=1
   if [ -f "$CTRL/MISSION.md" ]; then
-    say; say "## M. Mission ($CTRL/MISSION.md)"; [ $short = 1 ] && sed -n '/^## Mission/,/^## Deadlines/p' "$CTRL/MISSION.md" | sed -n '3,4p' || cat "$CTRL/MISSION.md"
+    say; say "## M. Mission ($CTRL/MISSION.md)"; [ $short = 1 ] && sed -n '/^## Mission/,/^## Deadlines/p' "$CTRL/MISSION.md" | sed -n '2,3p' || cat "$CTRL/MISSION.md"
     say; say "## G. Goals (control/registry/goals.yaml)"
     awk '/^- id:/{id=$3} /^  title:/{sub(/^  title: /,""); t=$0} /^  status:/{st=$2} /^  due:/{printf "- %-26s %-11s due %s  %s\n", id, st, $2, t}' "$CTRL/registry/goals.yaml"
     say; say "## S. Research status (control/STATUS.md)"; [ $short = 1 ] && sed -n '/^## Red flags/,/^## Reviewer gaps/p' "$CTRL/STATUS.md" | grep -E '^[0-9]+\. ' | cut -c1-110 || cat "$CTRL/STATUS.md"
@@ -660,7 +660,7 @@ cmd_backup() { # mirror every repo (all branches + a WIP snapshot ref) to rudra;
     [ "$(git -C "$d" rev-parse --is-shallow-repository)" = true ] && { fail "backup $r is a shallow clone -> git -C $d fetch --unshallow"; rc=1; continue; }
     GIT_LFS_SKIP_PUSH=1 to 600 git -C "$d" push -q "$url" 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' >/dev/null 2>&1 || { fail "backup $r push to rudra failed (guards? run: git -C $d push $url HEAD)"; rc=1; continue; }
     if [ -d "$d/.git/lfs/objects" ] && [ -n "$(ls -A "$d/.git/lfs/objects" 2>/dev/null)" ]; then
-      rsync -a --partial --timeout=120 "$d/.git/lfs/objects/" "md-rudra:mdops-state/mirrors/$r.git/lfs/objects/" >/dev/null 2>&1 || { fail "backup $r LFS objects not copied"; rc=1; }; fi
+      rssh rudra "mkdir -p ~/mdops-state/mirrors/$r.git/lfs/objects" && rsync -a --partial --timeout=120 "$d/.git/lfs/objects/" "md-rudra:mdops-state/mirrors/$r.git/lfs/objects/" >/dev/null 2>&1 || { fail "backup $r LFS objects not copied"; rc=1; }; fi
     w=$(wip_snapshot "$d"); ws=""
     if [ -n "$w" ]; then GIT_LFS_SKIP_PUSH=1 to 300 git -C "$d" push -q "$url" "$w:refs/backups/$(hostname -s)/$ts" >/dev/null 2>&1 && ws=" +wip ${w:0:7}" || ws=" (wip refused by guards: uncommitted frozen/data changes)"; fi
     n=$(git -C "$d" for-each-ref --format='%(objectname) %(refname:short)' refs/heads | while read -r sha ref; do [ "$(git -C "$d" ls-remote "$url" "refs/heads/$ref" | cut -f1)" = "$sha" ] || echo x; done | wc -l | tr -d ' ')
