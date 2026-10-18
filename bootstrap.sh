@@ -34,11 +34,12 @@ command -v git-lfs >/dev/null && git lfs install --skip-repo >/dev/null && say "
 # 3. repos (your GitHub credentials; private repos need them)
 clone() { # NAME BRANCH-IF-PRESENT
   local r=$1 b=$2
-  if [ ! -d "$WS/$r/.git" ]; then git clone -q "$GH/$r.git" "$WS/$r" || { say "! could not clone $r (GitHub login?) — fix and re-run"; return 1; }; say "+ cloned $r"; fi
+  if [ ! -d "$WS/$r/.git" ]; then GIT_LFS_SKIP_SMUDGE=1 git clone -q "$GH/$r.git" "$WS/$r" || { say "! could not clone $r (GitHub login?) — fix and re-run"; return 1; }; say "+ cloned $r"; fi
   if [ -n "$b" ] && git -C "$WS/$r" ls-remote --exit-code --heads origin "$b" >/dev/null 2>&1; then
     git -C "$WS/$r" fetch -q origin "$b" && { git -C "$WS/$r" checkout -q "$b" 2>/dev/null || git -C "$WS/$r" checkout -q -b "$b" --track "origin/$b"; } && say "+ $r on branch $b"
   fi
-  command -v git-lfs >/dev/null && git -C "$WS/$r" lfs install --local >/dev/null 2>&1 || true
+  if command -v git-lfs >/dev/null; then git -C "$WS/$r" lfs install --local >/dev/null 2>&1
+    git -C "$WS/$r" lfs pull >/dev/null 2>&1 && say "+ $r LFS files fetched" || say "! $r: some LFS files not fetched (non-fatal; later: git -C $WS/$r lfs pull)"; fi
 }
 clone into_the_unknown matterdoor-control-plane || true
 clone into_the_unknown_paper "" || true
@@ -58,7 +59,7 @@ if [ -f "$CONF" ]; then
   # 6. backup approval: the PI's standing choice (agents may not change it)
   if ! grep -q '^BACKUP_STANDING_APPROVAL=' "$CONF"; then
     printf 'Allow agents to back up code and documents (never data) automatically to your GitHub repos and to rudra? [y/N] '
-    read -r ans </dev/tty || ans=n
+    if [ -n "${MD_BACKUP_APPROVAL:-}" ]; then ans=$MD_BACKUP_APPROVAL; echo "$ans (from MD_BACKUP_APPROVAL)"; else read -r ans </dev/tty || ans=n; fi
     case "$ans" in y|Y|yes) v=yes;; *) v=no;; esac
     printf '\n# PI standing approval for code/doc backups (set by bootstrap %s)\nBACKUP_STANDING_APPROVAL=%s\n' "$(date '+%F %T')" "$v" >> "$CONF"
     MD_AGENT=human "$MDOPS" journal "PI set BACKUP_STANDING_APPROVAL=$v at bootstrap" >/dev/null 2>&1 || true
