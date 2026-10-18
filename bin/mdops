@@ -34,6 +34,8 @@ ok()   { printf '%sPASS%s %s\n' "$c_grn" "$c_off" "$*"; }
 warn() { printf '%sWARN%s %s\n' "$c_yel" "$c_off" "$*"; }
 bad()  { printf '%sFAIL%s %s\n' "$c_red" "$c_off" "$*"; }
 die()  { printf '%smdops:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 2; }
+pyy() { local p; for p in python3 "$HOME/miniconda3/bin/python" "$HOME/anaconda3/bin/python" "$HOME/miniforge3/bin/python" /usr/bin/python3; do
+  command -v "$p" >/dev/null 2>&1 && "$p" -c 'import yaml' 2>/dev/null && { echo "$p"; return 0; }; done; echo python3; }
 okl()  { printf 'OK %s\n' "$*"; }                       # compact one-line success
 fail() { printf 'FAIL %s\n' "$*"; return 1; }          # compact one-line failure: "<op> <why> -> <fix>"
 repo_dir() { local r; for r in $WS_REPOS; do case "$r" in "$1"*) echo "$WORKSPACE/$r"; return 0;; esac; done; [ -d "$1/.git" ] && { echo "$1"; return 0; }; return 1; }
@@ -545,7 +547,7 @@ cmd_brief() {
     say; say "## G. Goals (control/registry/goals.yaml)"
     awk '/^- id:/{id=$3} /^  title:/{sub(/^  title: /,""); t=$0} /^  status:/{st=$2} /^  due:/{printf "- %-26s %-11s due %s  %s\n", id, st, $2, t}' "$CTRL/registry/goals.yaml"
     say; say "## S. Research status (control/STATUS.md)"; [ $short = 1 ] && sed -n '/^## Red flags/,/^## Reviewer gaps/p' "$CTRL/STATUS.md" | grep -E '^[0-9]+\. ' | cut -c1-110 || cat "$CTRL/STATUS.md"
-    say; say "## K. Knowledge graph"; python3 "$CTRL/tools/kg_check.py" 2>&1 | head -$([ $short = 1 ] && echo 1 || echo 6)
+    say; say "## K. Knowledge graph"; "$(pyy)" "$CTRL/tools/kg_check.py" 2>&1 | head -$([ $short = 1 ] && echo 1 || echo 6)
   else say; say "## M. (no control plane found at $CTRL — run: mtd sync, or check WORKSPACE in $CONF)"; fi
   say; say "## A. Open asks (things agents could not access)"; remote_ro rudra ask-list 2>/dev/null | sed 's/^/    /' || say "    (rudra unreachable)"
   if [ $short = 1 ]; then
@@ -593,7 +595,7 @@ cmd_agent() { # claude|codex [task...] — start an agent CLI in the portal with
 # ======================================================================
 cmd_check() { # registry + guard + routes + asks, one line each
   local rc=0 l
-  if [ -f "$CTRL/tools/kg_check.py" ]; then l=$(python3 "$CTRL/tools/kg_check.py" 2>&1); echo "$l" | head -1; case "$l" in FAIL*) rc=1; [ $VERBOSE = 1 ] && echo "$l";; esac
+  if [ -f "$CTRL/tools/kg_check.py" ]; then l=$("$(pyy)" "$CTRL/tools/kg_check.py" 2>&1); echo "$l" | head -1; case "$l" in FAIL*) rc=1; [ $VERBOSE = 1 ] && echo "$l";; esac
   else fail "kg no control plane at $CTRL -> mtd sync"; rc=1; fi
   if [ -d "$PROJECT_DIR/.git" ]; then l=$(cd "$PROJECT_DIR" && python3 control/tools/repo_guard.py --staged 2>&1); echo "$l" | head -1; case "$l" in FAIL*) rc=1;; esac
     [ "$(git -C "$PROJECT_DIR" config core.hooksPath)" = control/hooks ] && okl "hooks active" || { fail "hooks not active -> git -C $PROJECT_DIR config core.hooksPath control/hooks"; rc=1; }; fi
@@ -660,7 +662,7 @@ cmd_backup() { # mirror every repo (all branches + a WIP snapshot ref) to rudra;
     [ "$(git -C "$d" rev-parse --is-shallow-repository)" = true ] && { fail "backup $r is a shallow clone -> git -C $d fetch --unshallow"; rc=1; continue; }
     GIT_LFS_SKIP_PUSH=1 to 600 git -C "$d" push -q "$url" 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' >/dev/null 2>&1 || { fail "backup $r push to rudra failed (guards? run: git -C $d push $url HEAD)"; rc=1; continue; }
     if [ -d "$d/.git/lfs/objects" ] && [ -n "$(ls -A "$d/.git/lfs/objects" 2>/dev/null)" ]; then
-      rssh rudra "mkdir -p ~/mdops-state/mirrors/$r.git/lfs/objects" && rsync -a --partial --timeout=120 "$d/.git/lfs/objects/" "md-rudra:mdops-state/mirrors/$r.git/lfs/objects/" >/dev/null 2>&1 || { fail "backup $r LFS objects not copied"; rc=1; }; fi
+      rssh rudra "mkdir -p ~/mdops-state/mirrors/$r.git/lfs/objects" && rsync -a "$d/.git/lfs/objects/" "md-rudra:mdops-state/mirrors/$r.git/lfs/objects/" >/dev/null 2>&1 || { fail "backup $r LFS objects not copied"; rc=1; }; fi
     w=$(wip_snapshot "$d"); ws=""
     if [ -n "$w" ]; then GIT_LFS_SKIP_PUSH=1 to 300 git -C "$d" push -q "$url" "$w:refs/backups/$(hostname -s)/$ts" >/dev/null 2>&1 && ws=" +wip ${w:0:7}" || ws=" (wip refused by guards: uncommitted frozen/data changes)"; fi
     n=$(git -C "$d" for-each-ref --format='%(objectname) %(refname:short)' refs/heads | while read -r sha ref; do [ "$(git -C "$d" ls-remote "$url" "refs/heads/$ref" | cut -f1)" = "$sha" ] || echo x; done | wc -l | tr -d ' ')
@@ -740,6 +742,27 @@ cmd_resources() { # everything currently in use, compactly
   echo "asks:    $(remote_ro rudra ask-list 2>/dev/null | grep -c '^#') open"
   echo "routes:  rudra=$(route rudra || echo DOWN) cluster=$(route cluster || echo DOWN)"; }
 
+
+cmd_setup() { # finish or repair the installation; human at a terminal only
+  [ "$AGENT" = human ] && [ -t 0 ] || die "mtd setup is for the PI at a terminal"
+  local rc=0 out ans
+  if ! route rudra >/dev/null; then fail "setup rudra: key login not working -> run: ssh-copy-id rudra   (type rudra's password once), then: mtd setup"; return 1; fi
+  route cluster >/dev/null || { fail "setup cluster unreachable -> run: ssh-copy-id anu   (or mtd login cluster), then: mtd setup"; return 1; }
+  okl "setup routes rudra=$(route rudra) cluster=$(route cluster)"
+  out="$STATE/discovery/$(date +%Y%m%d-%H%M%S)-setup"; mkdir -p "$out"
+  rssh rudra "env MD_ROLE=rudra MD_PEER_HOST=$(q "$CLUSTER_HOST") MD_PEER_USER=$(q "$CLUSTER_USER") bash -s" < "$ROOT/remote/probe.sh" > "$out/rudra.txt" 2>&1 && okl "setup rudra scanned ($(wc -l < "$out/rudra.txt" | tr -d ' ') lines)" || { fail "setup rudra scan failed (see $out/rudra.txt)"; rc=1; }
+  ln -sfn "$out" "$STATE/discovery/latest"
+  cmd_agent_key init >/dev/null; APPROVED="PI ran mtd setup $(date '+%F %T')"
+  cmd_agent_key authorize --yes >/dev/null 2>&1 && okl "setup agent key authorised (rudra jump-only, cluster no-forwarding)" || { fail "setup agent key"; rc=1; }
+  rssh rudra 'ssh -n -o BatchMode=yes -o ConnectTimeout=8 md-cluster true' >/dev/null 2>&1 && okl "setup rudra->cluster key already works" || { cmd_link_rudra_cluster --yes >/dev/null 2>&1 && okl "setup rudra->cluster key installed" || { fail "setup rudra->cluster key (cluster may refuse keys from rudra)"; rc=1; }; }
+  ho_fetch >/dev/null 2>&1; case $? in
+    2) if cmd_handoff init >/dev/null 2>&1; then okl "setup handoff created on rudra"; else fail "setup handoff init"; rc=1; fi;;
+    0) okl "setup handoff present";; *) fail "setup handoff unreachable"; rc=1;; esac
+  cmd_env snapshot rudra | head -1
+  if [ "$BACKUP_STANDING_APPROVAL" != yes ]; then printf 'Backups to GitHub + rudra are OFF. Allow agents to back up code and documents (never data) automatically? [y/N] '; read -r ans </dev/tty
+    case "$ans" in y|Y|yes) sed -i.bak 's/^BACKUP_STANDING_APPROVAL=.*/BACKUP_STANDING_APPROVAL=yes/' "$CONF" && rm -f "$CONF.bak" && cmd_journal "PI set BACKUP_STANDING_APPROVAL=yes (mtd setup)" >/dev/null && okl "setup backups on";; *) okl "setup backups stay off (agents ask before each push)";; esac; fi
+  cmd_check || rc=1; return $rc; }
+
 # ---------- discovery (read-only everywhere) ----------
 ssh_g() { ssh -G "$1" 2>/dev/null | awk -v k="$2" '$1==k{ $1=""; sub(/^ /,""); print }'; }
 
@@ -778,7 +801,14 @@ cmd_discover() {
 
   local mux="-o ControlMaster=auto -o ControlPath=$HOME/.ssh/cm/%C -o ControlPersist=4h -o ServerAliveInterval=15 -o ConnectTimeout=15"
   mkdir -p "$HOME/.ssh/cm"; chmod 700 "$HOME/.ssh/cm"
-  say "== probing rudra (type a password/OTP if prompted; the connection is then reused)"
+  for _h in "$rid" "$cid"; do
+    if ! to 25 ssh -n -o BatchMode=yes $mux "$_h" true >/dev/null 2>&1; then
+      say "== $_h needs a password/OTP: type it at the prompt below (it is not shown); the login is then reused for 4h"
+      # shellcheck disable=SC2086
+      ssh -o ControlMaster=yes -o ControlPath="$HOME/.ssh/cm/%C" -o ControlPersist=4h -fN "$_h" </dev/tty || warn "login to $_h failed"
+    fi
+  done
+  say "== probing rudra"
   # shellcheck disable=SC2086
   ssh $mux "$rid" "env MD_ROLE=rudra MD_PEER_HOST=$(q "$ch") MD_PEER_USER=$(q "$cu") bash -s" < "$ROOT/remote/probe.sh" > "$out/rudra.txt" 2>&1 \
     && ok "rudra probed ($(wc -l < "$out/rudra.txt") lines)" || bad "rudra probe failed — see $out/rudra.txt"
@@ -851,7 +881,7 @@ case "$c" in
   ssh) cmd_ssh "$@" ;;  open) cmd_open "$@" ;;  tunnel) cmd_tunnel "$@" ;;
   lock) cmd_lock "$@" ;;  journal) cmd_journal "$@" ;;
   run) cmd_run "$@" ;;  cancel) cmd_cancel "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
-  check) cmd_check ;;  sync) cmd_sync ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
+  setup) cmd_setup ;;  check) cmd_check ;;  sync) cmd_sync ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
   build) cmd_build "$@" ;;  env) cmd_env "$@" ;;  ledger) cmd_ledger "$@" ;;  ask) cmd_ask "$@" ;;  resources) cmd_resources ;;
   profile) cmd_profile "$@" ;;  brief) cmd_brief "$@" ;;  handoff) cmd_handoff "$@" ;;  agent) cmd_agent "$@" ;;
   agent-key) cmd_agent_key "$@" ;;
