@@ -742,6 +742,8 @@ cmd_cluster_wip() { # copy the cluster checkout's uncommitted tracked changes in
   rssh cluster "cd $root && git diff --binary HEAD" > "$dir/changes.patch" || { fail "cluster-wip could not read the diff"; return 1; }
   rssh cluster "cd $root && git diff --stat HEAD" > "$dir/DIFFSTAT.txt" 2>/dev/null
   [ "$(wc -c < "$dir/changes.patch")" -lt 20000000 ] || { fail "cluster-wip patch over 20 MB (kept locally in $dir, not committed) -> mtd ask"; return 1; }
+  local prev; prev=$(ls -d "$CTRL"/wip/cluster-* 2>/dev/null | grep -v "cluster-$ts\$" | sort | tail -1)
+  if [ -n "$prev" ] && cmp -s "$prev/changes.patch" "$dir/changes.patch"; then rm -rf "$dir"; okl "cluster-wip unchanged since $(basename "$prev") (nothing new to capture)"; return 0; fi
   { echo "# Cluster checkout: uncommitted work captured $(date '+%F %T %Z')"; echo
     echo "Captured by \`mtd cluster-wip\` (agent $AGENT). The cluster checkout was **not touched**: its"
     echo "files, index, branch and stash are exactly as they were. These are $n tracked files with"
