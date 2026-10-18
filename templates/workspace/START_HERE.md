@@ -60,13 +60,20 @@ The research details behind it are in `into_the_unknown/control/STATUS.md` and
 `control/registry/`.
 
 ## 3. Choose your work
-1. If the PI gave you a task in chat, do that.
-2. Otherwise, start with **Active runs & jobs**. Finish, harvest or report
-   anything there before starting new work.
-3. Then take the first **Next steps** item that is not marked (PI), not
-   locked by another agent (`mtd lock list`), and whose prerequisites are met.
-4. Take a lock for shared work: `mtd lock acquire <name> --ttl <min>`.
-5. If the work conflicts with `control/MISSION.md`, ask the PI.
+The plan is `into_the_unknown/control/PLAN.md`. It sets out parallel lanes
+(A evidence, B story and experiments, C clean code, D literature, E paper)
+and how agents decide together through `control/CONSENSUS.md`.
+1. If the PI gave you a task or a lane in chat, do that. For a lane, take the
+   lock `lane-<X>`.
+2. If no agent has done PLAN.md's **Now** steps yet (the journal and handoff
+   show it), do them first. Start with `mtd cluster-wip`, which preserves the
+   cluster checkout's uncommitted code.
+3. Otherwise, start with **Active runs & jobs** in the handoff. Finish,
+   harvest or report anything there.
+4. Then take the free lane with the earliest deadline, or the first
+   **Next steps** item that is not marked (PI) and not locked (`mtd lock list`).
+5. Write your positions with evidence into `CONSENSUS.md`. If anything
+   conflicts with `control/MISSION.md`, ask the PI.
 
 ## 4. Rules for the first five minutes (the full rules are in `AGENTS.md`)
 - **Ask the PI before anything is deleted or uploaded.** That includes
@@ -87,7 +94,8 @@ The research details behind it are in `into_the_unknown/control/STATUS.md` and
 - **If you cannot access something, do not work around it.** Run
   `mtd ask "<what> — <why>"`, tell the PI, and do other work.
 - **Use the levers.** They print one line each and check their own effect:
-  `mtd check | sync | save | backup | status | submit | harvest | handoff`.
+  `mtd check | sync | save | backup | status | submit | harvest | handoff | cluster-wip`.
+  `mtd sync` and `mtd backup` push code and docs for you.
 
 ## 5. If you cannot reach the machines
 If `mtd doctor` shows every host unreachable and you have no SSH keys, you are
