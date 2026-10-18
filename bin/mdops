@@ -310,8 +310,10 @@ cmd_sshconfig() {
     echo "Host md-cluster-direct"; echo "  HostName $CLUSTER_HOST"; [ -n "$CLUSTER_ORIG_JUMP" ] && echo "  ProxyJump $CLUSTER_ORIG_JUMP"
     echo "Host md-rudra md-rudra-lan"; echo "  HostKeyAlias md-rudra"; [ -n "$RUDRA_USER" ] && echo "  User $RUDRA_USER"; echo "  Port $RUDRA_PORT"
     for i in $RUDRA_IDENTITIES; do echo "  IdentityFile $i"; done
+    [ -f "$HOME/.ssh/mdops_agent_ed25519" ] && echo "  IdentityFile ~/.ssh/mdops_agent_ed25519"
     echo "Host md-cluster md-cluster-lan md-cluster-direct"; echo "  HostKeyAlias md-cluster"; [ -n "$CLUSTER_USER" ] && echo "  User $CLUSTER_USER"; echo "  Port $CLUSTER_PORT"
     for i in $CLUSTER_IDENTITIES; do echo "  IdentityFile $i"; done
+    [ -f "$HOME/.ssh/mdops_agent_ed25519" ] && echo "  IdentityFile ~/.ssh/mdops_agent_ed25519"
     cat <<'EOF'
 Host md-*
   ControlMaster auto
@@ -410,6 +412,111 @@ cmd_profile() { # apply FILE: merge KEY=VALUE lines into config/hosts.conf (back
     echo "set $line"
   done
   . "$CONF"; cmd_sshconfig; }
+
+
+# ---------- agent key: lets sandboxed agents (no access to your ~/.ssh) reach rudra + cluster ----------
+cmd_agent_key() {
+  local k="$STATE/agent/id_ed25519" pub
+  case "${1:-status}" in
+    init) mkdir -p "$STATE/agent"; chmod 700 "$STATE/agent"
+          [ -f "$k" ] || ssh-keygen -q -t ed25519 -N "" -C "mdops-agent:$(hostname -s 2>/dev/null || hostname):$(date +%Y%m%d)" -f "$k"
+          ok "agent key: $k.pub" ;;
+    authorize)
+      [ "$2" = --yes ] || die "adds the agent key to rudra (jump to the cluster only) and the cluster (no forwarding). Repeat with --yes."
+      [ -f "$k.pub" ] || cmd_agent_key init; pub=$(cat "$k.pub"); need_conf CLUSTER_HOST
+      rssh rudra "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qF $(q "$pub") ~/.ssh/authorized_keys || echo $(q "no-agent-forwarding,no-X11-forwarding,permitopen=\"$CLUSTER_HOST:$CLUSTER_PORT\" $pub") >> ~/.ssh/authorized_keys)" && ok "agent key authorised on rudra (may only jump to $CLUSTER_HOST)"
+      rssh cluster "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qF $(q "$pub") ~/.ssh/authorized_keys || echo $(q "no-agent-forwarding,no-X11-forwarding,no-port-forwarding $pub") >> ~/.ssh/authorized_keys)" && ok "agent key authorised on cluster (no forwarding)" ;;
+    use) [ -f "$k" ] || die "no agent key in $STATE/agent (run on the Mac: mdops agent-key init && mdops agent-key authorize --yes)"
+         mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"; cp "$k" "$HOME/.ssh/mdops_agent_ed25519"; chmod 600 "$HOME/.ssh/mdops_agent_ed25519"
+         grep -qF "config.d/matterdoor.conf" "$HOME/.ssh/config" 2>/dev/null || { touch "$HOME/.ssh/config"; printf 'Include ~/.ssh/config.d/matterdoor.conf\n%s\n' "$(cat "$HOME/.ssh/config")" > "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"; }
+         cmd_sshconfig ;;
+    revoke) [ "$2" = --yes ] || die "removes the agent key from rudra and the cluster. Repeat with --yes."
+         pub=$(cut -d' ' -f2 "$k.pub")
+         for h in rudra cluster; do rssh "$h" "f=~/.ssh/authorized_keys; [ -f \$f ] && grep -vF $(q "$pub") \$f > \$f.tmp; mv \$f.tmp \$f && chmod 600 \$f" && ok "revoked on $h"; done ;;
+    *) [ -f "$k.pub" ] && say "agent key: $(cut -d' ' -f3 "$k.pub")" || say "no agent key (mdops agent-key init)"; [ -f "$HOME/.ssh/mdops_agent_ed25519" ] && say "in use by this environment" ;;
+  esac; }
+
+# ---------- living handoff (canonical copy versioned on rudra; cached here) ----------
+HOFF="$STATE/handoff"
+ho_fetch() { # -> writes $HOFF/HANDOFF.md + $HOFF/.base ; returns 1 if offline (cache kept)
+  local tmp; mkdir -p "$HOFF"; tmp="$HOFF/.fetch.$$"
+  if remote_ro rudra handoff-get > "$tmp" 2>/dev/null; then
+    if head -1 "$tmp" | grep -q '^@@NONE@@'; then rm -f "$tmp"; echo none > "$HOFF/.base"; return 2; fi
+    head -1 "$tmp" | awk '{print $2, $3}' > "$HOFF/.base"; tail -n +2 "$tmp" > "$HOFF/HANDOFF.md"; rm -f "$tmp"; return 0
+  fi; rm -f "$tmp"; return 1; }
+
+ho_put() { # BASE SUMMARY FILE -> upload, then commit on rudra if BASE is still current
+  local inc=".incoming-$(printf '%s' "$AGENT" | tr -c 'A-Za-z0-9._-' _)"
+  rssh rudra "mkdir -p ~/mdops-state/handoff && cat > ~/mdops-state/handoff/$inc" < "$3" || return 1
+  remote rudra handoff-put "$AGENT" "$1" "$2" "$inc"; }
+
+cmd_handoff() {
+  local base ver
+  case "${1:-show}" in
+    show) ho_fetch; case $? in 1) warn "rudra unreachable — showing cached handoff";; 2) say "(no handoff yet: mtd handoff init)"; return;; esac
+          cat "$HOFF/HANDOFF.md" 2>/dev/null ;;
+    init) ho_fetch; [ $? = 2 ] || die "a handoff already exists (or rudra is unreachable)"
+          sed "s/^_Single source/_Created $(date '+%Y-%m-%d %H:%M') by $AGENT. Single source/" "$ROOT/templates/HANDOFF.template.md" > "$HOFF/HANDOFF.md"
+          echo none > "$HOFF/.base"; ho_put none "initial handoff" "$HOFF/HANDOFF.md" ;;
+    pull) remote rudra lock acquire handoff "$AGENT" "${2:-90}" || die "someone else is editing the handoff (see: mdops lock list)"
+          ho_fetch; case $? in 0) ;; 2) remote rudra lock release handoff "$AGENT" >/dev/null; die "no handoff yet: mtd handoff init";; *) remote rudra lock release handoff "$AGENT" >/dev/null; die "could not fetch the handoff from rudra";; esac
+          say "Edit: $HOFF/HANDOFF.md   (base $(cat "$HOFF/.base"))"
+          say "Then: mtd handoff push \"one-line summary of this session\"   (or: mtd handoff release)" ;;
+    push) [ -n "$2" ] || die 'mtd handoff push "one-line summary"'; [ -f "$HOFF/.base" ] || die "pull first: mtd handoff pull"
+          base=$(awk '{print $1}' "$HOFF/.base")
+          awk -v line="- $(date '+%Y-%m-%d %H:%M') [$AGENT] $2" '{print} /^## Session log/{getline; print; print line; next}' "$HOFF/HANDOFF.md" > "$HOFF/.new" 2>/dev/null
+          grep -qF "[$AGENT] $2" "$HOFF/.new" || { cp "$HOFF/HANDOFF.md" "$HOFF/.new"; printf -- '- %s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M')" "$AGENT" "$2" >> "$HOFF/.new"; }
+          ver=$(ho_put "$base" "$2" "$HOFF/.new") || die "push refused (see message above); your edit is still in $HOFF/HANDOFF.md"
+          mv "$HOFF/.new" "$HOFF/HANDOFF.md"; ho_fetch >/dev/null; remote rudra lock release handoff "$AGENT" >/dev/null; ok "$ver" ;;
+    release) remote rudra lock release handoff "$AGENT" ;;
+    log) remote_ro rudra handoff-log "${2:-20}" ;;
+    *) die "mtd handoff show|pull|push \"summary\"|release|log|init" ;;
+  esac; }
+
+# ---------- the briefing: first thing every agent runs (`mtd`) ----------
+epoch_of() { date -j -f %Y-%m-%d "$1" +%s 2>/dev/null || date -d "$1" +%s 2>/dev/null; }
+cmd_brief() {
+  local now d label e days
+  now=$(date +%s)
+  say "# MTD BRIEFING  —  read all of this before acting"
+  say "_$(date '+%a %d %b %Y %H:%M %Z') · host $(hostname -s 2>/dev/null || hostname) · agent=$AGENT · portal $(git -C "$ROOT" log -1 --format=%h 2>/dev/null)_"
+  say; say "## 0. Clock"
+  for d in ${MTD_DEADLINES:-2026-11-16\|CVPR_2027_paper_submission_AoE 2026-11-23\|CVPR_2027_supplementary_AoE}; do
+    e=$(epoch_of "${d%%|*}"); [ -n "$e" ] || continue; days=$(( (e - now) / 86400 )); label=${d#*|}
+    say "- ${label//_/ }: ${d%%|*}  →  $days days left"
+  done
+  say; say "## 1. Non-negotiable rules (full text: $ROOT/AGENTS.md; project rules: CLUSTER_PROJECT_ROOT/AGENTS.md)"
+  sed -n '/^## 2\. /,/^## 3\. /p' "$ROOT/AGENTS.md" | sed '1d;$d'
+  say; say "## 2. Live state"
+  if to 90 "$0" doctor > "$STATE/last-doctor.txt" 2>&1; then :; fi
+  sed 's/\x1b\[[0-9;]*m//g' "$STATE/last-doctor.txt" | grep -vE '^== MatterDoor portal doctor' | sed 's/^/    /'
+  say; say "## 3. Running work + locks"
+  { remote_ro rudra runs 8; remote_ro cluster runs 8; } 2>/dev/null | sed 's/^/    /' || say "    (unreachable)"
+  say; say "## 4. Recent journal (all agents)"
+  remote_ro rudra journal-tail 15 2>/dev/null | sed 's/^/    /' || { say "    (rudra unreachable; offline entries:)"; tail -n 10 "$STATE/journal-offline.md" 2>/dev/null; }
+  say; say "## 5. Living handoff"
+  ho_fetch; case $? in
+    0) say "_version $(awk '{print $2}' "$HOFF/.base") on rudra_"; cat "$HOFF/HANDOFF.md";;
+    1) say "_rudra unreachable — CACHED copy, may be stale_"; cat "$HOFF/HANDOFF.md" 2>/dev/null;;
+    2) say "(none yet — create it: mtd handoff init)";;
+  esac
+  say; say "## 6. Your session protocol"
+  say "1. export MD_AGENT=<tool>-<task>   (now: $AGENT)"
+  say "2. Take a lock for shared work (mtd lock acquire NAME --ttl MIN); journal milestones (mtd journal \"...\")."
+  say "3. Long work only via mtd run / mtd submit; data only via stage/harvest; never compute on the cluster login node."
+  say "4. END OF SESSION (mandatory): mtd handoff pull → edit state/handoff/HANDOFF.md in place (state, runs, ledger, decisions, next steps) → mtd handoff push \"summary\"."
+  say; say "## 7. Where things are"
+  say "- portal: $ROOT  (docs/network.md, docs/storage.md, docs/runbook.md)"
+  say "- config: $CONF   discovery: $STATE/discovery/latest/"
+  say "- cluster project checkout: ${CLUSTER_PROJECT_ROOT:-unset}   work root: ${CLUSTER_WORK_ROOT:-unset}   group: ${CLUSTER_GROUP_ROOT:-unset}"
+  say "- rudra data: ${RUDRA_DATA_ROOT:-unset}   archive: ${RUDRA_ARCHIVE_ROOT:-unset}"
+  say "- commands: mtd help"; }
+
+cmd_agent() { # claude|codex [task...] — start an agent CLI in the portal with the briefing as its first input
+  local tool=${1:-claude}; shift 2>/dev/null; command -v "$tool" >/dev/null || die "$tool CLI not installed on this machine"
+  export MD_AGENT="${MD_AGENT:-$tool-$(date +%m%d%H%M)}"
+  cmd_brief > "$STATE/BRIEF.md" 2>&1
+  cd "$ROOT" && exec "$tool" "You are $MD_AGENT. First read $STATE/BRIEF.md completely (rules, live state, living handoff). Then: ${*:-continue from 'Next steps' #1 in the handoff}. At the end of the session update the handoff with mtd handoff pull/push."; }
 
 # ---------- discovery (read-only everywhere) ----------
 ssh_g() { ssh -G "$1" 2>/dev/null | awk -v k="$2" '$1==k{ $1=""; sub(/^ /,""); print }'; }
@@ -519,7 +626,8 @@ case "$c" in
   ssh) cmd_ssh "$@" ;;  open) cmd_open "$@" ;;  tunnel) cmd_tunnel "$@" ;;
   lock) cmd_lock "$@" ;;  journal) cmd_journal "$@" ;;
   run) cmd_run "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
-  profile) cmd_profile "$@" ;;
+  profile) cmd_profile "$@" ;;  brief) cmd_brief "$@" ;;  handoff) cmd_handoff "$@" ;;  agent) cmd_agent "$@" ;;
+  agent-key) cmd_agent_key "$@" ;;
   submit) cmd_submit "$@" ;;  census) cmd_census "$@" ;;  keepalive) cmd_keepalive "$@" ;;
   quota) cmd_quota ;;  stage) cmd_stage "$@" ;;  harvest) cmd_harvest "$@" ;;  prune) cmd_prune "$@" ;;
   link-rudra-cluster) cmd_link_rudra_cluster "$@" ;;  harden-rudra) cmd_harden_rudra "$@" ;;

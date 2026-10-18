@@ -185,6 +185,29 @@ prune() { # WORK_ROOT YES(0/1)
   [ "$yes" = 1 ] || echo "(dry run — re-run with --yes to delete)"
 }
 
+
+# ---------- living handoff (git-versioned on this host) ----------
+HO="$STATE/handoff"
+handoff_init_repo() { mkdir -p "$HO"; [ -d "$HO/.git" ] || { git -C "$HO" init -q && git -C "$HO" config user.name mdops && git -C "$HO" config user.email mdops@localhost; }; }
+handoff_get() { handoff_init_repo
+  if [ ! -f "$HO/HANDOFF.md" ]; then echo "@@NONE@@"; return 0; fi
+  printf '@@BASE %s %s\n' "$(git -C "$HO" rev-parse --verify -q HEAD || echo none)" "$(git -C "$HO" rev-list --count HEAD 2>/dev/null || echo 0)"
+  cat "$HO/HANDOFF.md"; }
+handoff_put() { # AGENT BASE SUMMARY INCOMING_FILE (uploaded into $HO first)
+  local agent=$1 base=$2 summary=$3 inc="$HO/${4##*/}" cur h
+  handoff_init_repo; cur=$(git -C "$HO" rev-parse --verify -q HEAD || echo none)
+  [ "$base" = "$cur" ] || { rm -f "$inc"; die "handoff changed since you pulled it (base $base, now $cur). Run 'mtd handoff pull', merge your changes, push again."; }
+  [ -f "$inc" ] || die "no uploaded handoff file"; mv "$inc" "$HO/HANDOFF.md.new"
+  [ -s "$HO/HANDOFF.md.new" ] || { rm -f "$HO/HANDOFF.md.new"; die "empty handoff refused"; }
+  for h in '## Mission' '## Current state' '## Next steps' '## Session log'; do
+    grep -q "^$h" "$HO/HANDOFF.md.new" || { rm -f "$HO/HANDOFF.md.new"; die "handoff refused: missing section '$h'"; }
+  done
+  mv "$HO/HANDOFF.md.new" "$HO/HANDOFF.md"
+  git -C "$HO" add HANDOFF.md && git -C "$HO" commit -qm "$agent: $summary" || die "nothing changed"
+  journal "$agent" "handoff v$(git -C "$HO" rev-list --count HEAD): $summary" >/dev/null
+  echo "HANDOFF v$(git -C "$HO" rev-list --count HEAD) $(git -C "$HO" rev-parse --short HEAD)"; }
+handoff_log() { handoff_init_repo; git -C "$HO" log --format='v%h %ci %s' -n "${1:-20}" 2>/dev/null || echo "(no versions)"; }
+
 sub=${1:-}; shift || true
 case "$sub" in
   lock)     a=${1:-list}; shift || true; case "$a" in acquire) lock_acquire "$@";; release) lock_release "$@";; *) lock_list;; esac ;;
@@ -197,6 +220,9 @@ case "$sub" in
   usage)    usage "$@" ;;
   prune)    prune "$@" ;;
   mark-harvested) [ -d "$1" ] && date -u +%FT%TZ > "$1/.harvested" && echo "marked $1" ;;
+  handoff-get) handoff_get ;;
+  handoff-put) handoff_put "$@" ;;
+  handoff-log) handoff_log "$@" ;;
   ping)     echo "pong $(hostname -s) $(now)" ;;
   *) die "unknown subcommand '$sub'" ;;
 esac

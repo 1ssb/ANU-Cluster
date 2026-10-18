@@ -1,0 +1,11 @@
+#!/bin/bash
+# mtd — the one command. No arguments: the full agent briefing (rules, live state,
+# running work, journal, living handoff, protocol). Anything else: passed to mdops.
+#   mtd                    briefing (first command of every agent session)
+#   mtd handoff pull|push  the single co-evolving handoff
+#   mtd agent claude|codex start an agent here, pre-briefed
+#   mtd doctor / run / submit / stage / ...   (= mdops ...)
+D="$(cd "$(dirname "$(readlink "$0" 2>/dev/null || echo "$0")")" && pwd)"
+[ -x "$D/mdops" ] || D="$HOME/ANU-Cluster/bin"
+if [ $# -eq 0 ]; then exec "$D/mdops" brief; fi
+exec "$D/mdops" "$@"

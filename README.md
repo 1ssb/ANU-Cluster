@@ -3,7 +3,13 @@
 Tools for working on the ANU CECS Slurm cluster from a laptop, through an
 always-on office GPU box.
 
-## mdops: the access portal
+## mtd / mdops: the access portal
+Every agent session starts with **`mtd`**. It prints one briefing: the
+rules, live state of every machine, running work, the agents' journal, and
+the **living handoff**. The handoff is a single document that each session
+updates at the end with `mtd handoff pull/push`, with every version kept.
+`mtd X` is the same as `mdops X`.
+
 `mdops` is one command, for humans and AI agents, that gives you:
 
 - **Robust routes.**
@@ -24,6 +30,7 @@ always-on office GPU box.
 Install on the Mac:
 ```bash
 git clone https://github.com/1ssb/ANU-Cluster.git ~/ANU-Cluster && ~/ANU-Cluster/install.sh
+mtd     # the briefing
 ```
 `install.sh` adds one `Include` line to `~/.ssh/config`, links `~/bin/mdops`,
 runs a read-only discovery scan of all three machines, and writes

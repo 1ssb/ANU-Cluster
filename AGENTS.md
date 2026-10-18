@@ -10,12 +10,34 @@ the `into_the_unknown` repo's `AGENTS.md` (login-node role, GPU contract,
 storage roots, frozen protocols) applies in full. Where the two differ, the
 stricter rule wins.
 
-## 0. Start of every session
-1. Set an identity: `export MD_AGENT=<tool>-<short-task>` (e.g. `claude-census`).
-   It goes into locks, journal entries and run records.
-2. Run `mdops doctor`. If anything FAILs, fix that first or tell the human.
-3. Run `mdops journal --tail 20` to see what other agents did and what is running.
-4. Before shared work, take a lock (section 4), and release it when done.
+## 0. Start and end of every session (the `mtd` protocol)
+1. **Start: run `mtd`** (no arguments). It is the single briefing for any
+   agent, on any machine or network:
+   - the deadline clock and these rules;
+   - live health of every route and machine;
+   - running jobs and locks;
+   - the recent journal of all agents;
+   - **the living handoff** (`HANDOFF.md`, versioned on rudra), which holds
+     the mission, current state, results ledger, decisions and next steps.
+   Do not act before reading all of it.
+2. Set an identity: `export MD_AGENT=<tool>-<short-task>`. It goes into locks,
+   the journal, run records and handoff versions.
+3. During the session, take a lock for shared work and journal milestones
+   (`mtd journal "..."`).
+4. **End (mandatory):**
+   1. `mtd handoff pull` takes the lock and fetches the latest copy.
+   2. Edit `state/handoff/HANDOFF.md` *in place*: update current state, runs,
+      ledger rows (with run ids), decisions, problems and next steps.
+   3. `mtd handoff push "one-line summary"`.
+
+   The handoff co-evolves: one document, rewritten by each session, with every
+   version kept on rudra (`mtd handoff log`). A push from a stale copy is
+   refused, and so is one missing a required section.
+5. **Sandboxed agents** (no access to the human's `~/.ssh`, e.g. Cowork) run
+   `mdops agent-key use` once in their environment. The portal's agent key is
+   restricted: on rudra it may only jump to the cluster, and on the cluster it
+   gets no forwarding. Revoke it with `mdops agent-key revoke --yes`.
+6. `mtd agent claude|codex "task"` starts that CLI here, pre-briefed.
 
 ## 1. Machines and roles
 | name | what it is | used for | never |
@@ -91,7 +113,12 @@ Code flows through GitHub. Commit and push, then `git pull` on the host.
   in `~/mdops-state/runs/<id>/` on the host.
 
 ## Commands
+`mtd` is the same tool as `mdops`: `mtd X` = `mdops X`, and bare `mtd` = the briefing.
 ```
+mtd                                  BRIEFING: rules, live state, runs, journal, living handoff (run first, always)
+mtd handoff show|pull|push "sum"|release|log|init    the single co-evolving handoff (versioned on rudra)
+mtd agent claude|codex ["task"]      start an agent CLI in the portal, pre-briefed
+mdops agent-key init|authorize --yes|use|revoke --yes   restricted key for sandboxed agents
 mdops doctor                         health of routes, keepalive, rudra, cluster storage, locks
 mdops net status|up|ping|netcheck    Tailscale on this Mac (+ GlobalProtect presence); 'down --yes' is human-only
 mdops route [rudra|cluster]          which route works right now
