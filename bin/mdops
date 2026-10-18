@@ -425,7 +425,7 @@ cmd_discover() {
     echo "===== tailscale"; [ -n "$TS_BIN" ] && { to 10 "$TS_BIN" status 2>&1; to 25 "$TS_BIN" netcheck 2>&1 | head -25; } || echo "no tailscale cli"
     echo "===== globalprotect"; ls -d /Applications/GlobalProtect.app 2>/dev/null || echo "not installed"
     echo "===== ssh hosts in ~/.ssh/config (names + resolved endpoints only; no keys)"
-    for f in "$HOME/.ssh/config" "$HOME"/.ssh/config.d/*; do [ -f "$f" ] && awk 'tolower($1)=="host"{for(i=2;i<=NF;i++) print $i}' "$f"; done | grep -v '[*?!]' | sort -u | while read -r hh; do
+    for f in "$HOME/.ssh/config" "$HOME"/.ssh/config.d/*; do [ -f "$f" ] && awk 'tolower($1)=="host"{for(i=2;i<=NF;i++) print $i}' "$f"; done | grep -v '[*?!]' | grep -v '^md-' | sort -u | while read -r hh; do
       printf '%-22s host=%s user=%s port=%s jump=%s id=%s\n' "$hh" "$(ssh_g "$hh" hostname)" "$(ssh_g "$hh" user)" "$(ssh_g "$hh" port)" "$(ssh_g "$hh" proxyjump)" "$(ssh_g "$hh" identityfile | head -1)"
     done
   } > "$out/mac.txt" 2>&1
@@ -438,6 +438,7 @@ cmd_discover() {
   cq=$(sed -n '/===== ssh hosts/,$p' "$out/mac.txt" | grep -E 'host=[^ ]*(cecs\.anu\.edu\.au|cluster)' | grep -vi rudra | awk '{print $1}' | head -1)
   printf 'SSH name (alias or user@host) that reaches the cluster [%s]: ' "${cq:-none found}"; read -r cid </dev/tty; cid=${cid:-$cq}
   [ -n "$rid" ] && [ -n "$cid" ] || die "need both names; re-run mdops discover"
+  case "$rid$cid" in *md-*) die "give your own aliases or user@host, not the generated md-* names";; esac
 
   rh=$(ssh_g "$rid" hostname); ru=$(ssh_g "$rid" user); rp=$(ssh_g "$rid" port); rj=$(ssh_g "$rid" proxyjump)
   ch=$(ssh_g "$cid" hostname); cu=$(ssh_g "$cid" user); cp=$(ssh_g "$cid" port); cj=$(ssh_g "$cid" proxyjump)
@@ -497,6 +498,11 @@ SLURM_GRES=                     # typed GRES only, e.g. gpu:3090:1 (untyped GPU 
 CLUSTER_PROJECT_ROOT=           # project git checkout on the cluster
 CLUSTER_SUBMIT_GUARD=           # project GPU submit guard, relative to CLUSTER_PROJECT_ROOT
 EOF
+    if [ -f "$CONF.bak.$ts" ]; then # keep storage/slurm/project choices across --regen
+      grep -E '^(RUDRA_DATA_ROOT|RUDRA_ARCHIVE_ROOT|CLUSTER_[A-Z_]*ROOT|CLUSTER_QUOTA_[A-Z_]*|CLUSTER_SUBMIT_GUARD|SLURM_[A-Z_]*)=[^ #]' "$CONF.bak.$ts" > "$STATE/keep.$ts" || true
+      [ -s "$STATE/keep.$ts" ] && cmd_profile apply "$STATE/keep.$ts" >/dev/null && say "kept your storage/slurm/project settings from the previous config"
+      rm -f "$STATE/keep.$ts"
+    fi
     ok "wrote $CONF"; . "$CONF"; cmd_sshconfig
   else say "config exists; not overwritten (mdops discover --regen to rebuild it)"; fi
   { echo "# discovery $ts"; echo; for f in mac rudra cluster; do echo "- $f.txt: $(wc -l < "$out/$f.txt" 2>/dev/null) lines"; done; } > "$out/README.md"
