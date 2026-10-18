@@ -172,6 +172,7 @@ mdops run rudra --job job:ID --dir REPO [--allow-dirty] [--no-gpu] -- CMD... tmu
 mdops run cluster --job job:ID --dir REPO --no-gpu [--time --mem --cpus] -- CMD   CPU Slurm job
 mdops submit cluster/JOB.sh --job job:ID [--check] [--allow-dirty]             GPU job via the project guard; run record + $MD_OUT_DIR
 mtd sync cluster                     fast-forward the cluster's project checkout (where job scripts live); never switches branch
+mtd cluster-wip                      copy the cluster checkout's uncommitted tracked changes into git (control/wip/), checkout untouched
 (agents: --job must be declared in control/registry/jobs.yaml; GPU jobs must be PI-approved)
 mdops runs [rudra|cluster] | mdops status RUN_ID | mdops cancel RUN_ID (own runs only)
 mdops quota | mdops census           storage usage (census = du inside a Slurm CPU job)

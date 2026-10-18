@@ -304,9 +304,15 @@ cmd_stage() { # PATH [--from rudra|mac] [--name N] [--yes]   -> cluster work/sta
   rssh rudra "du -sh $(q "$src") 2>/dev/null; ssh -o BatchMode=yes md-cluster mkdir -p $(q "$CLUSTER_WORK_ROOT/stage/$name") && $(retry_rsync "$n" "$src/" "$dest")" \
     || die "stage failed (rudra->cluster key missing? run: mdops link-rudra-cluster)"; }
 
-harvest_mac() { # ID YES -> $WORKSPACE/data/runs/ID, verified by file count + bytes
-  local id=$1 yes=$2 a dst="$WORKSPACE/data/runs/$1" n=-n i ok=1 rc rl; a=$(route_or_die cluster) || exit 2
-  [ $yes = 1 ] && n=; mkdir -p "$dst"
+run_bytes() { rssh cluster "find $(q "$CLUSTER_WORK_ROOT/runs/$1") -type f -printf '%s\n' | awk '{b+=\$1} END{print b+0}'"; }   # one run dir only (bounded)
+harvest_mac() { # ID YES -> $WORKSPACE/data/runs/ID, verified by file count + bytes. Downloads to this Mac above 1 GB need the PI (dec:2026-10-18-transfers).
+  local id=$1 yes=$2 a dst="$WORKSPACE/data/runs/$1" n=-n i ok=1 rc rl b fk; a=$(route_or_die cluster) || exit 2
+  if [ $yes = 1 ]; then b=$(run_bytes "$id"); [ -n "$b" ] || die "harvest: run $id not found on the cluster"
+    fk=$(df -Pk "$WORKSPACE" 2>/dev/null | awk 'NR==2{print $4}')
+    [ $(( b / 1024 + 10485760 )) -lt "${fk:-0}" ] || die "harvest $id: $((b/1048576)) MB would leave this Mac under 10 GB free; ask the PI"
+    [ "$b" -le 1073741824 ] || need_approval "download cluster run $id ($((b/1048576)) MB) to this Mac"
+    n=; fi
+  mkdir -p "$dst"
   for i in 1 2 3 4 5; do rsync -a $n "$a:$CLUSTER_WORK_ROOT/runs/$id/" "$dst/" && { ok=0; break; }; sleep $((i*15)); done
   [ $ok = 0 ] || { fail "harvest $id rsync failed"; return 1; }
   [ $yes = 1 ] || { okl "harvest $id to mac (dry run — add --yes)"; return 0; }
@@ -690,8 +696,11 @@ cmd_sync() { # fetch + fast-forward every workspace repo; never merges, never di
     set -- $(git -C "$d" rev-list --left-right --count HEAD...'@{u}'); ahead=$1; behind=$2
     if [ "$behind" -gt 0 ] && [ "$ahead" = 0 ]; then
       git -C "$d" merge -q --ff-only '@{u}' 2>/dev/null || { fail "sync $r cannot fast-forward (local edits overlap) -> commit with mtd save, then mtd sync"; rc=1; continue; }
-    elif [ "$behind" -gt 0 ]; then fail "sync $r diverged (ahead $ahead, behind $behind) -> git -C $d rebase @{u} (resolve) or ask the PI"; rc=1; continue; fi
-    [ "$(git -C "$d" rev-list --count '@{u}..HEAD')" = "$ahead" ] && okl "sync $r $b $(git -C "$d" rev-parse --short HEAD) ahead=$ahead behind=0 dirty=$dirty"
+    elif [ "$behind" -gt 0 ]; then   # local-only commits + newer upstream commits: replay the local ones on top (they were never pushed)
+      if [ "$dirty" = 0 ] && git -C "$d" rebase -q '@{u}' >/dev/null 2>&1; then ahead=$(git -C "$d" rev-list --count '@{u}..HEAD'); okl "sync $r replayed $ahead local commit(s) on top of upstream"
+      else git -C "$d" rebase --abort 2>/dev/null; fail "sync $r diverged (ahead $ahead, behind $behind) and cannot replay cleanly -> resolve in $d (never force-push)"; rc=1; continue; fi; fi
+    if [ "$ahead" -gt 0 ] && [ "$BACKUP_STANDING_APPROVAL" = yes ]; then cmd_push "$r" >/dev/null 2>&1 && ahead=0 || warn "sync $r could not push $ahead local commit(s) (mtd push $r shows why)"; fi
+    okl "sync $r $b $(git -C "$d" rev-parse --short HEAD) ahead=$ahead behind=0 dirty=$dirty"
   done
   # the workspace manual is a generated copy of the portal templates: keep it current (a local edit is backed up, never lost)
   local f n=0 bk="$WORKSPACE/scratch/manual-backups"
@@ -724,6 +733,29 @@ cmd_push() { # REPO|all: push current branch to GitHub (upload: PI approval or s
     rs=$(to 60 git -C "$d" ls-remote origin "refs/heads/$b" | cut -f1)
     [ "$rs" = "$sha" ] && okl "push $r $b ${sha:0:7} verified" || { fail "push $r remote $rs != local $sha"; rc=1; }
   done; return $rc; }
+
+cmd_cluster_wip() { # copy the cluster checkout's uncommitted tracked changes into git (control/wip/cluster-<ts>/); the checkout is never touched
+  need_conf CLUSTER_PROJECT_ROOT; local ts dir st n root; root=$(q "$CLUSTER_PROJECT_ROOT"); ts=$(date +%Y%m%d-%H%M%S); dir="$CTRL/wip/cluster-$ts"
+  st=$(rssh cluster "cd $root && echo branch=\$(git rev-parse --abbrev-ref HEAD) head=\$(git rev-parse HEAD) && git status --porcelain --untracked-files=no") || { fail "cluster-wip cluster unreachable -> mtd doctor"; return 1; }
+  n=$(printf '%s\n' "$st" | tail -n +2 | grep -c .); [ "$n" -gt 0 ] || { okl "cluster-wip nothing uncommitted in the cluster checkout"; return 0; }
+  mkdir -p "$dir"; printf '%s\n' "$st" > "$dir/STATUS.txt"
+  rssh cluster "cd $root && git diff --binary HEAD" > "$dir/changes.patch" || { fail "cluster-wip could not read the diff"; return 1; }
+  rssh cluster "cd $root && git diff --stat HEAD" > "$dir/DIFFSTAT.txt" 2>/dev/null
+  [ "$(wc -c < "$dir/changes.patch")" -lt 20000000 ] || { fail "cluster-wip patch over 20 MB (kept locally in $dir, not committed) -> mtd ask"; return 1; }
+  { echo "# Cluster checkout: uncommitted work captured $(date '+%F %T %Z')"; echo
+    echo "Captured by \`mtd cluster-wip\` (agent $AGENT). The cluster checkout was **not touched**: its"
+    echo "files, index, branch and stash are exactly as they were. These are $n tracked files with"
+    echo "uncommitted changes in \`$CLUSTER_PROJECT_ROOT\`. Untracked files are not included: listing"
+    echo "them would mean scanning the tree on the login node."; echo
+    echo "- base: $(printf '%s' "$st" | head -1)"
+    echo "- \`changes.patch\`: \`git diff --binary HEAD\`; \`STATUS.txt\`: the file list; \`DIFFSTAT.txt\`: the size of each change"; echo
+    echo "Use: \`git apply --check\` it on a checkout of the base commit. Changes to frozen paths"
+    echo "(guards.yaml) stay read-only, so port what is needed into new, non-frozen files (a new version)."
+  } > "$dir/README.md"
+  git -C "$PROJECT_DIR" add "control/wip/cluster-$ts" && git -C "$PROJECT_DIR" commit -q -m "wip: cluster checkout's uncommitted work ($n files) captured $ts, checkout untouched" -m "Agent: $AGENT" >/dev/null 2>&1 \
+    || { fail "cluster-wip commit refused (see: git -C $PROJECT_DIR status)"; return 1; }
+  cmd_journal "captured $n uncommitted cluster files into control/wip/cluster-$ts" >/dev/null
+  cmd_push "$PROJECT_REPO" | tail -1; okl "cluster-wip $n files -> control/wip/cluster-$ts (in git; read README.md there)"; }
 
 wip_snapshot() { # DIR -> prints a commit sha capturing tracked + small untracked work, without touching index/worktree
   local d=$1 tmp f sz files=""; tmp=$(mktemp); git -C "$d" read-tree --index-output="$tmp" HEAD 2>/dev/null || { rm -f "$tmp"; return 1; }
@@ -1035,7 +1067,7 @@ case "$c" in
   ssh) cmd_ssh "$@" ;;  open) cmd_open "$@" ;;  tunnel) cmd_tunnel "$@" ;;
   lock) cmd_lock "$@" ;;  journal) cmd_journal "$@" ;;
   run) cmd_run "$@" ;;  cancel) cmd_cancel "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
-  hub) cmd_hub "$@" ;;  setup) cmd_setup ;;  awake) cmd_awake "$@" ;;  check) cmd_check ;;  sync) cmd_sync "$@" ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
+  hub) cmd_hub "$@" ;;  cluster-wip) cmd_cluster_wip ;;  setup) cmd_setup ;;  awake) cmd_awake "$@" ;;  check) cmd_check ;;  sync) cmd_sync "$@" ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
   build) cmd_build "$@" ;;  env) cmd_env "$@" ;;  ledger) cmd_ledger "$@" ;;  ask) cmd_ask "$@" ;;  resources) cmd_resources ;;
   profile) cmd_profile "$@" ;;  brief) cmd_brief "$@" ;;  handoff) cmd_handoff "$@" ;;  agent) cmd_agent "$@" ;;
   agent-key) cmd_agent_key "$@" ;;

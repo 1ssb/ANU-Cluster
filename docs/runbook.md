@@ -37,6 +37,13 @@ Start with `mdops doctor`. It names the failing layer.
 
 Never lower the floor to get a job through.
 
+## Cluster checkout has uncommitted changes
+`mtd sync cluster` will not fast-forward a checkout that has uncommitted
+changes. Run `mtd cluster-wip`. It copies the changes into
+`control/wip/cluster-<ts>/` in git (patch, file list, diffstat) and pushes
+them, without touching the checkout. Never stash, reset or edit those
+changes on the cluster.
+
 ## GPU submit refused
 - `job … is 'proposed'`: the PI must approve it in `jobs.yaml`.
 - `no job script`: commit and push the script, then `mtd sync cluster`.
