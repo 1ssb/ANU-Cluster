@@ -1,0 +1,523 @@
+#!/bin/bash
+# mdops — the MatterDoor portal. One entry point for humans and agents on this Mac
+# to reach rudra (4090 office box) and the ANU Slurm cluster safely.
+# Portable to macOS /bin/bash 3.2 (no assoc arrays, no mapfile, no set -u).
+# Read AGENTS.md before using this as an agent.
+set -o pipefail
+
+ROOT="$(cd "$(dirname "$(readlink "$0" 2>/dev/null || echo "$0")")/.." 2>/dev/null && pwd)"
+[ -f "$ROOT/AGENTS.md" ] || ROOT="$HOME/matterdoor-ops"
+CONF="$ROOT/config/hosts.conf"
+STATE="$ROOT/state"
+SSHCONF="$HOME/.ssh/config.d/matterdoor.conf"
+REMOTE="$ROOT/remote/mdops-remote.sh"
+AGENT="${MD_AGENT:-human}"
+mkdir -p "$STATE" 2>/dev/null
+
+# ---------- defaults (overridden by config/hosts.conf) ----------
+RUDRA_USER=; RUDRA_TS_HOST=; RUDRA_LAN_HOST=; RUDRA_PORT=22; RUDRA_IDENTITIES=
+CLUSTER_USER=; CLUSTER_HOST=; CLUSTER_PORT=22; CLUSTER_IDENTITIES=; CLUSTER_ORIG_JUMP=
+RUDRA_DATA_ROOT=; RUDRA_ARCHIVE_ROOT=; CLUSTER_WORK_ROOT=; CLUSTER_GROUP_ROOT=
+CLUSTER_QUOTA_WARN_PCT=80; CLUSTER_QUOTA_STOP_PCT=90
+SLURM_PARTITION=; SLURM_CPU_PARTITION=; SLURM_ACCOUNT=; SLURM_QOS=; SLURM_GRES=gpu:1
+CLUSTER_PROJECT_ROOT=; CLUSTER_SUBMIT_GUARD=
+[ -f "$CONF" ] && . "$CONF"
+
+c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+[ -t 1 ] || { c_red=; c_grn=; c_yel=; c_dim=; c_off=; }
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%sPASS%s %s\n' "$c_grn" "$c_off" "$*"; }
+warn() { printf '%sWARN%s %s\n' "$c_yel" "$c_off" "$*"; }
+bad()  { printf '%sFAIL%s %s\n' "$c_red" "$c_off" "$*"; }
+die()  { printf '%smdops:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 2; }
+need_conf() { local v; for v in "$@"; do eval "[ -n \"\$$v\" ]" || die "config value $v is not set in $CONF (see docs/storage.md; lead agent sets it after reviewing discovery)"; done; }
+
+# portable timeout (macOS has no timeout(1)): perl alarm
+to() { local s=$1; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi
+  perl -e 'alarm shift @ARGV; exec @ARGV or exit 127' "$s" "$@"; }
+
+q() { local out= a; for a in "$@"; do out="$out $(printf '%q' "$a")"; done; printf '%s' "${out# }"; }
+
+TS_BIN=
+for c in tailscale /Applications/Tailscale.app/Contents/MacOS/Tailscale /usr/local/bin/tailscale /opt/homebrew/bin/tailscale; do
+  if command -v "$c" >/dev/null 2>&1; then TS_BIN=$c; break; fi
+done
+
+# ---------- routing ----------
+# rudra:   md-rudra (Tailscale) -> md-rudra-lan (campus / GlobalProtect)
+# cluster: md-cluster (jump via md-rudra) -> md-cluster-lan (jump via md-rudra-lan) -> md-cluster-direct
+candidates() { case "$1" in
+  rudra)   echo "md-rudra"; [ -n "$RUDRA_LAN_HOST" ] && [ "$RUDRA_LAN_HOST" != "$RUDRA_TS_HOST" ] && echo "md-rudra-lan";;
+  cluster) echo "md-cluster"; [ -n "$RUDRA_LAN_HOST" ] && [ "$RUDRA_LAN_HOST" != "$RUDRA_TS_HOST" ] && echo "md-cluster-lan"; echo "md-cluster-direct";;
+  *) die "unknown host '$1' (use rudra or cluster)";; esac; }
+
+alive() { # ALIAS -> 0 if usable without any prompt
+  ssh -O check "$1" >/dev/null 2>&1 && return 0
+  to 25 ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" true >/dev/null 2>&1; }
+
+route() { # HOST -> prints working alias (cached 5 min), or fails
+  local h=$1 cache="$STATE/route.$1" a t
+  [ -f "$SSHCONF" ] || die "no ssh config yet: run 'mdops discover' (or 'mdops sshconfig')"
+  if [ -f "$cache" ]; then read -r a t < "$cache"
+    if [ -n "$a" ] && [ $(( $(date +%s) - ${t:-0} )) -lt 300 ] && ssh -O check "$a" >/dev/null 2>&1; then echo "$a"; return 0; fi
+  fi
+  for a in $(candidates "$h"); do
+    if alive "$a"; then echo "$a $(date +%s)" > "$cache"; echo "$a"; return 0; fi
+  done
+  rm -f "$cache"; return 1; }
+
+route_or_die() { route "$1" || die "no working route to $1. Try: mdops doctor   (if it needs a password/OTP: mdops login $1 — a human must type it)"; }
+
+rssh() { # HOST [ssh args/cmd...]  — no automatic retry (commands may not be idempotent)
+  local h=$1 a; shift; a=$(route_or_die "$h") || exit 2; ssh "$a" "$@"; }
+
+rssh_ro() { # HOST CMD — read-only commands: one automatic re-route + retry on connection failure
+  local h=$1 rc; shift; rssh "$h" "$@"; rc=$?
+  if [ $rc = 255 ]; then rm -f "$STATE/route.$h"; sleep 3; warn "connection to $h dropped; re-routing once"; rssh "$h" "$@"; rc=$?; fi
+  return $rc; }
+
+remote_state() { [ "$1" = cluster ] && [ -n "$CLUSTER_WORK_ROOT" ] && printf 'MD_STATE=%s' "$(q "$CLUSTER_WORK_ROOT/mdops-state")" || printf 'MD_STATE=$HOME/mdops-state'; }
+
+remote() { # HOST SUBCMD ARGS...  — stream remote/mdops-remote.sh, run it there
+  local h=$1; shift; rssh "$h" "env $(remote_state "$h") bash -s -- $(q "$@")" < "$REMOTE"; }
+remote_ro() { local h=$1; shift; rssh_ro "$h" "env $(remote_state "$h") bash -s -- $(q "$@")" < "$REMOTE"; }
+
+# ---------- login-node guard: agents may only run these on the cluster login node ----------
+LOGIN_OK=" squeue sacct sinfo sprio sshare scontrol scancel ls cat head tail stat readlink realpath df quota lfs git cd pwd echo printf hostname whoami id date wc test true mkdir basename dirname "
+login_guard() { # CMDSTRING -> 0 if allowed
+  local seg w rest t
+  t=${1//&&/}; t=${t//2>\/dev\/null/}; t=${t//>\/dev\/null/}
+  case "$t" in *'$('*|*'`'*|*'&'*|*'>'*) echo "login-node guard: no command substitution, background jobs or file redirection on the cluster login node" >&2; return 3;; esac
+  printf '%s\n' "$1" | tr ';|' '\n\n' | awk '{gsub(/&&/,"\n"); print}' | while IFS= read -r seg; do
+    set -- $seg; w=$1; [ -z "$w" ] && continue
+    case "$LOGIN_OK" in *" $w "*) ;; *) echo "login-node guard: '$w' is not allowed on the cluster login node. Use: mdops submit SCRIPT (GPU, via the project guard), mdops run cluster --no-gpu ... (CPU job), or do it on rudra." >&2; exit 3;; esac
+    shift; rest="$*"
+    case "$w" in
+      git) case "$rest" in *clone*|*gc*|*fsck*|*lfs\ pull*|*lfs\ fetch*) echo "login-node guard: git $rest is heavy — do it in a job or on rudra" >&2; exit 3;; esac ;;
+      lfs) case "$rest" in quota*) ;; *) echo "login-node guard: only 'lfs quota' is allowed" >&2; exit 3;; esac ;;
+      cat|head|tail|wc) case "$rest" in *\**) echo "login-node guard: name files explicitly (no globs) for $w" >&2; exit 3;; esac ;;
+    esac
+  done; }
+
+# ---------- commands ----------
+cmd_help() { sed -n '/^## Commands/,/^## /p' "$ROOT/AGENTS.md" | sed '$d'; }
+
+cmd_net() {
+  local sub=${1:-status}
+  [ -n "$TS_BIN" ] || warn "Tailscale CLI not found on this Mac"
+  case "$sub" in
+    status)
+      if [ -n "$TS_BIN" ]; then say "== Tailscale (this Mac)"; to 10 "$TS_BIN" status 2>&1 | head -25; fi
+      say "== GlobalProtect (ANU VPN)"
+      if [ -d /Applications/GlobalProtect.app ]; then pgrep -fl GlobalProtect >/dev/null && say "installed, running" || say "installed, not running (mdops net vpn)"
+      else say "not installed — optional fallback; Tailscale via rudra is the primary path (docs/network.md)"; fi
+      say "== default route"; route -n get default 2>/dev/null | grep -E 'interface|gateway' || netstat -rn 2>/dev/null | grep -m2 default ;;
+    up)   [ -n "$TS_BIN" ] && "$TS_BIN" up ;;
+    down) [ "$2" = --yes ] || die "tailscale down cuts the primary route to rudra; repeat with --yes if the human asked"; "$TS_BIN" down ;;
+    netcheck) to 30 "$TS_BIN" netcheck ;;
+    ping) to 15 "$TS_BIN" ping -c 3 "${RUDRA_TS_HOST:-rudra}" ;;
+    vpn)  [ -d /Applications/GlobalProtect.app ] && open -a GlobalProtect && say "GlobalProtect opened — a human signs in (MFA)" || die "GlobalProtect not installed (see docs/network.md)";;
+    *) die "net status|up|down --yes|netcheck|ping|vpn" ;;
+  esac; }
+
+cmd_login() { # HOST: open a master interactively (password/OTP typed by the human)
+  local h=${1:-cluster} a; [ -t 0 ] || die "login needs a human at a terminal"
+  for a in $(candidates "$h"); do
+    say "trying $a ..."; if ssh -o ConnectTimeout=12 -fN -o ControlMaster=yes "$a"; then
+      ok "master open on $a (reused by every agent for 4h, or until the network drops)"; echo "$a $(date +%s)" > "$STATE/route.$h"; return 0; fi
+  done; die "could not log in to $h by any route"; }
+
+cmd_route() { local h; for h in ${1:-rudra cluster}; do printf '%-8s ' "$h"; route "$h" || echo "UNREACHABLE"; done; }
+
+cmd_ssh()  { [ -n "$1" ] || die "mdops ssh rudra|cluster [cmd]"; local h=$1; shift
+  if [ "$h" = cluster ] && [ "$AGENT" != human ]; then
+    [ $# -gt 0 ] || die "agents get no interactive shell on the cluster login node"
+    login_guard "$*" || exit 3
+  fi
+  rssh "$h" "$@"; }
+cmd_open() { # interactive: mosh+tmux to rudra when available (survives Wi-Fi changes/sleep), ssh+tmux otherwise
+  local h=${1:-rudra} s=${2:-md} a
+  [ "$AGENT" = human ] || die "open is for humans; agents use mdops ssh/run"
+  a=$(route_or_die "$h") || exit 2
+  if [ "$h" = rudra ] && command -v mosh >/dev/null 2>&1 && ssh "$a" 'command -v mosh-server' >/dev/null 2>&1; then
+    exec mosh --ssh="ssh" "$a" -- tmux new-session -A -s "$s"
+  fi
+  [ "$h" = cluster ] && warn "cluster login node: edit/inspect only — compute goes through Slurm"
+  ssh "$a" -t "tmux new-session -A -s $(q "$s") 2>/dev/null || exec \$SHELL -l"; }
+
+cmd_submit() { # SCRIPT (relative to CLUSTER_PROJECT_ROOT): validated + submitted by the project's own guard
+  local s=$1; need_conf CLUSTER_PROJECT_ROOT CLUSTER_SUBMIT_GUARD; [ -n "$s" ] || die "mdops submit cluster/SOME_JOB.sh [--check]"
+  local mode=--submit; [ "$2" = --check ] && mode=--check
+  local out; out=$(rssh cluster "cd $(q "$CLUSTER_PROJECT_ROOT") && bash $(q "$CLUSTER_SUBMIT_GUARD") --check $(q "$s") && { [ $mode = --check ] || bash $(q "$CLUSTER_SUBMIT_GUARD") --submit $(q "$s"); }") ; local rc=$?
+  printf '%s\n' "$out"
+  [ $rc = 0 ] && [ $mode = --submit ] && cmd_journal "submitted $s via project guard: $(printf '%s' "$out" | grep -o 'Submitted batch job [0-9]*')"
+  return $rc; }
+
+cmd_census() { # sizes of the cluster roots, measured inside a Slurm CPU job (never on the login node)
+  need_conf CLUSTER_WORK_ROOT
+  local roots=${*:-"$CLUSTER_GROUP_ROOT /home/group/rudra-shared"}
+  SLURM_GRES=; cmd_run cluster --name census --dir "$CLUSTER_WORK_ROOT" --allow-dirty --no-gpu --time 01:00:00 --mem 4G --cpus 2 -- \
+    bash -c "for r in $roots; do echo \"== \$r\"; du -sh --apparent-size \"\$r\"/* \"\$r\"/.[!.]* 2>/dev/null | sort -h | tail -60; done; df -h $roots; quota -s 2>/dev/null"; }
+cmd_tunnel() { # HOST REMOTE_PORT [LOCAL_PORT]
+  local h=$1 rp=$2 lp=${3:-$2} a; [ -n "$rp" ] || die "mdops tunnel rudra|cluster REMOTE_PORT [LOCAL_PORT]"
+  a=$(route_or_die "$h") || exit 2
+  ssh -O forward -L "$lp:localhost:$rp" "$a" && say "http://localhost:$lp -> $h:$rp (stop: ssh -O cancel -L $lp:localhost:$rp $a)"; }
+
+cmd_lock() {
+  local a=${1:-list} name=$2 ttl=120 force=; shift 2 2>/dev/null
+  while [ $# -gt 0 ]; do case "$1" in --ttl) ttl=$2; shift;; --force) force=--force;; esac; shift; done
+  case "$a" in
+    acquire) [ -n "$name" ] || die "lock acquire NAME [--ttl MIN]"; remote rudra lock acquire "$name" "$AGENT" "$ttl" ;;
+    release) [ -n "$name" ] || die "lock release NAME"; remote rudra lock release "$name" "$AGENT" $force ;;
+    *) remote rudra lock list ;;
+  esac; }
+
+cmd_journal() {
+  if [ "$1" = --tail ]; then remote rudra journal-tail "${2:-30}"; return; fi
+  [ -n "$*" ] || die 'mdops journal "what you did / what is running"'
+  remote rudra journal "$AGENT" "$*" 2>/dev/null || { printf -- '- %s [%s@mac OFFLINE] %s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/journal-offline.md"; warn "rudra unreachable — saved to state/journal-offline.md"; }; }
+
+cmd_run() { # rudra|cluster --name N --dir D [opts] -- CMD...
+  local h=$1; shift; local name= dir= allow=0 gpu=1 gpus=1 time=04:00:00 mem=32G cpus=8 part=$SLURM_PARTITION
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do case "$1" in
+    --name) name=$2; shift;; --dir) dir=$2; shift;; --allow-dirty) allow=1;; --no-gpu) gpu=0; gpus=0;;
+    --gpus) gpus=$2; shift;; --time) time=$2; shift;; --mem) mem=$2; shift;; --cpus) cpus=$2; shift;; --partition) part=$2; shift;;
+    *) die "unknown option $1";; esac; shift; done
+  [ "$1" = -- ] && shift
+  [ -n "$name" ] && [ -n "$dir" ] && [ $# -gt 0 ] || die "mdops run rudra|cluster --name NAME --dir REMOTE_REPO_DIR [--allow-dirty] -- CMD..."
+  case "$h" in
+    rudra) remote rudra run-local "$name" "$dir" "$allow" "$gpu" "$AGENT" "$RUDRA_DATA_ROOT" -- "$@" ;;
+    cluster)
+      need_conf CLUSTER_WORK_ROOT
+      if [ "$gpus" -gt 0 ] 2>/dev/null && [ -n "$CLUSTER_SUBMIT_GUARD" ]; then
+        die "GPU jobs on this cluster go through the project guard: put the job script in the project's cluster/ dir and run 'mdops submit cluster/JOB.sh' (typed GRES + gpu_job_guard). For CPU work add --no-gpu."
+      fi
+      if [ "$gpus" -gt 0 ] 2>/dev/null; then case "$SLURM_GRES" in gpu:*:*) ;; *) die "set a typed SLURM_GRES (e.g. gpu:3090:1) in $CONF, or use --no-gpu";; esac
+      else part=${SLURM_CPU_PARTITION:-}; fi
+      set -- "--nodes=1" "--ntasks=1" "--time=$time" "--mem=$mem" "--cpus-per-task=$cpus" -- "$@"
+      [ "$gpus" -gt 0 ] 2>/dev/null && set -- "--gres=${SLURM_GRES%:*}:$gpus" "$@"
+      [ -n "$part" ] && set -- "--partition=$part" "$@"
+      [ -n "$SLURM_ACCOUNT" ] && set -- "--account=$SLURM_ACCOUNT" "$@"
+      [ -n "$SLURM_QOS" ] && set -- "--qos=$SLURM_QOS" "$@"
+      remote cluster run-slurm "$name" "$dir" "$allow" "$AGENT" "$CLUSTER_WORK_ROOT" "$CLUSTER_QUOTA_STOP_PCT" "$@" ;;
+    *) die "run rudra|cluster" ;;
+  esac; }
+
+cmd_runs() { local h; for h in ${1:-rudra cluster}; do say "== $h"; remote "$h" runs "${2:-15}" || warn "$h unreachable"; done; }
+cmd_status() { local id=$1; [ -n "$id" ] || die "mdops status RUN_ID"; case "$id" in *-cluster-*) remote cluster run-status "$id";; *) remote rudra run-status "$id";; esac; }
+
+cmd_quota() {
+  [ -n "$CLUSTER_WORK_ROOT" ] && { printf 'cluster work  %s: ' "$CLUSTER_WORK_ROOT"; remote cluster usage "$CLUSTER_WORK_ROOT"; }
+  [ -n "$CLUSTER_GROUP_ROOT" ] && { printf 'cluster group %s: ' "$CLUSTER_GROUP_ROOT"; remote cluster usage "$CLUSTER_GROUP_ROOT"; }
+  [ -n "$RUDRA_DATA_ROOT" ] && { printf 'rudra data    %s: ' "$RUDRA_DATA_ROOT"; remote rudra usage "$RUDRA_DATA_ROOT"; }
+  printf 'rudra home: '; remote rudra usage "~" 2>/dev/null || rssh rudra 'df -h ~ | tail -1'
+  say "${c_dim}(pct used, used, limit, source) — writes to the cluster stop at ${CLUSTER_QUOTA_STOP_PCT}%${c_off}"; }
+
+retry_rsync() { # DRYFLAG SRC DST -> shell snippet run ON rudra: resumable, stall-detecting, 5 attempts
+  printf 'ok=1; for i in 1 2 3 4 5; do rsync -a --partial --timeout=120 --human-readable --stats %s %s %s && { ok=0; break; }; echo "[mdops] rsync attempt $i failed; retrying in $((i*15))s"; sleep $((i*15)); done; [ $ok = 0 ]' "$1" "$(q "$2")" "$(q "$3")"; }
+
+pct_of() { remote "$1" usage "$2" | awk '{print $1}'; }
+
+cmd_stage() { # RUDRA_SRC [--name N] [--yes]   rudra canonical -> cluster work/stage/N (runs ON rudra)
+  local src=$1 name= yes=0; shift
+  while [ $# -gt 0 ]; do case "$1" in --name) name=$2; shift;; --yes) yes=1;; esac; shift; done
+  need_conf CLUSTER_WORK_ROOT; [ -n "$src" ] || die "mdops stage RUDRA_PATH [--name NAME] [--yes]"
+  name=${name:-$(basename "$src")}
+  local p; p=$(pct_of cluster "$CLUSTER_WORK_ROOT"); [ "${p:-100}" -lt "$CLUSTER_QUOTA_STOP_PCT" ] || die "cluster storage at ${p}% — prune first (mdops prune)"
+  local dest="md-cluster:$CLUSTER_WORK_ROOT/stage/$name/" n=-n; [ $yes = 1 ] && n=
+  say "rudra:$src/  ->  $dest   $( [ $yes = 1 ] && echo REAL || echo 'DRY RUN (add --yes)')"
+  rssh rudra "du -sh $(q "$src") 2>/dev/null; ssh -o BatchMode=yes md-cluster mkdir -p $(q "$CLUSTER_WORK_ROOT/stage/$name") && $(retry_rsync "$n" "$src/" "$dest")" \
+    || die "stage failed (rudra->cluster key missing? run: mdops link-rudra-cluster)"; }
+
+cmd_harvest() { # RUN_ID [--yes]   cluster work/runs/ID -> rudra data root (runs ON rudra, never deletes)
+  local id=$1 yes=0; [ "$2" = --yes ] && yes=1; need_conf CLUSTER_WORK_ROOT RUDRA_DATA_ROOT; [ -n "$id" ] || die "mdops harvest RUN_ID [--yes]"
+  local src="md-cluster:$CLUSTER_WORK_ROOT/runs/$id/" dst="$RUDRA_DATA_ROOT/runs/$id/" n=-n; [ $yes = 1 ] && n=
+  rssh rudra "mkdir -p $(q "$dst") && $(retry_rsync "$n" "$src" "$dst")" || die "harvest failed"
+  if [ $yes = 1 ]; then
+    local diff; diff=$(rssh rudra "rsync -a -n --itemize-changes $(q "$src") $(q "$dst") | grep -c '^[<>c]'")
+    if [ "${diff:-1}" = 0 ]; then remote cluster mark-harvested "$CLUSTER_WORK_ROOT/runs/$id"; ok "harvested + verified; cluster copy now prunable"; else warn "verify found $diff differences; NOT marked harvested"; fi
+  else say "(dry run — add --yes)"; fi; }
+
+cmd_prune() { need_conf CLUSTER_WORK_ROOT; remote cluster prune "$CLUSTER_WORK_ROOT" "$([ "$1" = --yes ] && echo 1 || echo 0)"; }
+
+cmd_link_rudra_cluster() { # give rudra its own key to the cluster so data moves rudra<->cluster directly
+  need_conf CLUSTER_HOST CLUSTER_USER; [ "$1" = --yes ] || die "this adds a rudra-only key to the cluster's ~/.ssh/authorized_keys and a 'md-cluster' entry to rudra's ~/.ssh/config. Repeat with --yes."
+  local pub
+  pub=$(rssh rudra 'set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; k=~/.ssh/id_ed25519_mdcluster
+    [ -f $k ] || ssh-keygen -q -t ed25519 -N "" -C "rudra->cluster mdops" -f $k; cat $k.pub') || die "could not create key on rudra"
+  rssh cluster "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qF $(q "$pub") ~/.ssh/authorized_keys || echo $(q "$pub") >> ~/.ssh/authorized_keys)" || die "could not authorise key on cluster"
+  local block="Host md-cluster
+  HostName $CLUSTER_HOST
+  User $CLUSTER_USER
+  Port $CLUSTER_PORT
+  IdentityFile ~/.ssh/id_ed25519_mdcluster
+  IdentitiesOnly yes
+  ServerAliveInterval 15
+  ServerAliveCountMax 8
+  ControlMaster auto
+  ControlPath ~/.ssh/cm-%C
+  ControlPersist 1h"
+  rssh rudra "touch ~/.ssh/config; chmod 600 ~/.ssh/config; grep -q '^Host md-cluster\$' ~/.ssh/config || printf '\n%s\n' $(q "$block") >> ~/.ssh/config; ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new md-cluster true" \
+    && ok "rudra -> cluster works without a password" || bad "key installed but rudra still cannot log in (cluster may forbid keys from campus hosts; see docs/runbook.md)"; }
+
+cmd_harden_rudra() {
+  [ -t 0 ] || die "harden-rudra needs a human to type the sudo password"
+  rssh rudra 'mkdir -p ~/mdops-state/bin && cat > ~/mdops-state/bin/rudra-harden.sh' < "$ROOT/remote/rudra-harden.sh" || die "copy failed"
+  rssh rudra -t "sudo bash ~/mdops-state/bin/rudra-harden.sh --cluster-host=$(q "$CLUSTER_HOST") $(q "$@")"; }
+
+cmd_clean() { # scan | caches [--yes]  (rudra only; anything not a cache goes through mdops archive)
+  case "${1:-scan}" in
+    scan) rssh rudra "env MD_ROLE=rudra bash -s" < "$ROOT/remote/probe.sh" | sed -n '/===== home top-level/,/===== gpu/p' ;;
+    caches)
+      local n=1; [ "$2" = --yes ] && n=0
+      rssh rudra "n=$n; for d in ~/.cache/pip ~/.local/share/Trash/files ~/.local/share/Trash/info ~/.cache/thumbnails ~/.npm/_cacache; do
+          [ -d \"\$d\" ] || continue; printf '%s\t%s\n' \"\$(du -sh \"\$d\" | cut -f1)\" \"\$d\"; [ \$n = 0 ] && rm -rf -- \"\$d\"/* \"\$d\"/.[!.]* 2>/dev/null
+        done
+        if command -v conda >/dev/null; then if [ \$n = 0 ]; then conda clean -a -y -q; else conda clean -a --dry-run -q 2>/dev/null | tail -3; fi; fi
+        echo 'HF/torch model caches older than 30 days (re-downloadable, listed only — remove by hand or ask):'
+        find ~/.cache/huggingface/hub -mindepth 1 -maxdepth 1 -atime +30 -exec du -sh {} + 2>/dev/null | sort -h | tail -15
+        [ \$n = 1 ] && echo '(dry run — add --yes)'" ;;
+    *) die "clean scan | clean caches [--yes]" ;;
+  esac; }
+
+cmd_archive() { # RUDRA_PATH [--yes]: tar+zstd into RUDRA_ARCHIVE_ROOT, verify, then (only with --remove-original) delete
+  local src=$1 yes=0 rm=0; shift; while [ $# -gt 0 ]; do case "$1" in --yes) yes=1;; --remove-original) rm=1;; esac; shift; done
+  need_conf RUDRA_ARCHIVE_ROOT; [ -n "$src" ] || die "mdops archive RUDRA_PATH [--yes] [--remove-original]"
+  [ $yes = 1 ] || { rssh rudra "du -sh $(q "$src"); df -h $(q "$RUDRA_ARCHIVE_ROOT") | tail -1"; say "(dry run — add --yes to archive; originals are kept unless --remove-original AND verification passes)"; return; }
+  rssh rudra "set -e; src=\$(readlink -f $(q "$src")); name=\$(basename \"\$src\")-\$(date +%Y%m%d); dst=$(q "$RUDRA_ARCHIVE_ROOT")/\$name.tar.zst
+    mkdir -p $(q "$RUDRA_ARCHIVE_ROOT"); cd \"\$(dirname \"\$src\")\"
+    tar -cf - \"\$(basename \"\$src\")\" | zstd -T0 -10 -q -o \"\$dst\"
+    zstd -t -q \"\$dst\"; n1=\$(find \"\$(basename \"\$src\")\" | wc -l); n2=\$(zstd -dc \"\$dst\" | tar -tf - | wc -l)
+    sha256sum \"\$dst\" > \"\$dst.sha256\"; zstd -dc \"\$dst\" | tar -tvf - > \"\$dst.list.txt\"
+    echo \"archive \$dst entries src=\$n1 archive=\$n2\"; [ \"\$n1\" = \"\$n2\" ] || { echo 'COUNT MISMATCH — original kept'; exit 3; }
+    if [ $rm = 1 ]; then rm -rf -- \"\$src\" && echo \"removed original \$src\"; else echo 'verified; original kept (add --remove-original to delete it)'; fi"; }
+
+cmd_sshconfig() {
+  [ -f "$CONF" ] || die "no $CONF — run mdops discover first"
+  local rh=${RUDRA_TS_HOST:-$RUDRA_LAN_HOST} i
+  [ -n "$rh" ] && [ -n "$CLUSTER_HOST" ] || die "RUDRA_TS_HOST/RUDRA_LAN_HOST and CLUSTER_HOST must be set in $CONF"
+  mkdir -p "$HOME/.ssh/config.d" "$HOME/.ssh/cm"; chmod 700 "$HOME/.ssh" "$HOME/.ssh/cm"
+  {
+    echo "# managed by mdops — regenerate with: mdops sshconfig  (source: $CONF)"
+    echo "Host md-rudra"; echo "  HostName $rh"
+    if [ -n "$RUDRA_LAN_HOST" ] && [ "$RUDRA_LAN_HOST" != "$rh" ]; then
+      echo "Host md-rudra-lan"; echo "  HostName $RUDRA_LAN_HOST"
+      echo "Host md-cluster-lan"; echo "  HostName $CLUSTER_HOST"; echo "  ProxyJump md-rudra-lan"
+    fi
+    echo "Host md-cluster"; echo "  HostName $CLUSTER_HOST"; echo "  ProxyJump md-rudra"
+    echo "Host md-cluster-direct"; echo "  HostName $CLUSTER_HOST"; [ -n "$CLUSTER_ORIG_JUMP" ] && echo "  ProxyJump $CLUSTER_ORIG_JUMP"
+    echo "Host md-rudra md-rudra-lan"; echo "  HostKeyAlias md-rudra"; [ -n "$RUDRA_USER" ] && echo "  User $RUDRA_USER"; echo "  Port $RUDRA_PORT"
+    for i in $RUDRA_IDENTITIES; do echo "  IdentityFile $i"; done
+    echo "Host md-cluster md-cluster-lan md-cluster-direct"; echo "  HostKeyAlias md-cluster"; [ -n "$CLUSTER_USER" ] && echo "  User $CLUSTER_USER"; echo "  Port $CLUSTER_PORT"
+    for i in $CLUSTER_IDENTITIES; do echo "  IdentityFile $i"; done
+    cat <<'EOF'
+Host md-*
+  ControlMaster auto
+  ControlPath ~/.ssh/cm/%C
+  ControlPersist 4h
+  ServerAliveInterval 15
+  ServerAliveCountMax 8
+  ConnectTimeout 12
+  ConnectionAttempts 2
+  TCPKeepAlive yes
+  StrictHostKeyChecking accept-new
+  ForwardAgent no
+  ForwardX11 no
+EOF
+  } > "$SSHCONF.tmp"
+  chmod 600 "$SSHCONF.tmp"
+  if ssh -F "$SSHCONF.tmp" -G md-cluster >/dev/null 2>&1; then mv "$SSHCONF.tmp" "$SSHCONF"; ok "wrote $SSHCONF"
+  else rm -f "$SSHCONF.tmp"; die "generated ssh config failed to parse; nothing changed"; fi
+  grep -qF "config.d/matterdoor.conf" "$HOME/.ssh/config" 2>/dev/null || warn "~/.ssh/config does not Include config.d/matterdoor.conf (install.sh adds it)"
+  rm -f "$STATE"/route.*; }
+
+cmd_doctor() {
+  local fails=0 a t0 t1 out
+  say "== MatterDoor portal doctor  $(date '+%F %T')  agent=$AGENT"
+  [ -f "$CONF" ] && ok "config $CONF" || { bad "no config — run mdops discover"; return 1; }
+  [ -f "$SSHCONF" ] && ok "ssh config $SSHCONF" || { bad "no ssh config — mdops sshconfig"; fails=$((fails+1)); }
+  if [ -n "$TS_BIN" ] && to 8 "$TS_BIN" status >/dev/null 2>&1; then ok "Tailscale up on this Mac"
+    if [ -n "$RUDRA_TS_HOST" ]; then
+      to 8 "$TS_BIN" status 2>/dev/null | grep -F "$RUDRA_TS_HOST" | grep -q offline && warn "rudra shows OFFLINE in Tailscale" || ok "rudra listed on the tailnet ($RUDRA_TS_HOST)"
+    else warn "rudra is not on Tailscale yet (docs/network.md step 1)"; fi
+  else warn "Tailscale not running on this Mac (mdops net up)"; fi
+  for h in rudra cluster; do
+    t0=$(date +%s); a=$(route "$h"); t1=$(date +%s)
+    if [ -n "$a" ]; then ok "$h reachable via $a ($((t1-t0))s to pick route)"
+      [ "$a" = md-rudra ] || [ "$a" = md-cluster ] || warn "$h is on a fallback route ($a)"
+    else bad "$h unreachable by any route — if it needs a password/OTP a human runs: mdops login $h"; fails=$((fails+1)); fi
+  done
+  if route rudra >/dev/null; then
+    out=$(rssh rudra 'nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null; echo "tmux_md=$(tmux ls 2>/dev/null | grep -c "^md-")"; df -h ~ | awk "NR==2{print \"home_free=\"\$4\" (\"\$5\" used)\"}"; ssh -O check md-cluster 2>/dev/null; ssh -o BatchMode=yes -o ConnectTimeout=8 md-cluster true 2>/dev/null && echo rudra_to_cluster=ok || echo rudra_to_cluster=missing; systemctl is-active mdops-netwatch.timer 2>/dev/null | sed "s/^/netwatch=/"; systemctl is-enabled sleep.target 2>/dev/null | sed "s/^/sleep=/"' 2>/dev/null)
+    say "${c_dim}$(printf '%s\n' "$out" | sed 's/^/  rudra: /')${c_off}"
+    printf '%s' "$out" | grep -q 'rudra_to_cluster=ok' && ok "rudra -> cluster direct key" || warn "rudra -> cluster key missing (mdops link-rudra-cluster --yes) — needed for stage/harvest"
+    printf '%s' "$out" | grep -q 'sleep=masked' && ok "rudra cannot sleep" || warn "rudra can still sleep/suspend (mdops harden-rudra)"
+    printf '%s' "$out" | grep -q 'netwatch=active' && ok "rudra network watchdog active" || warn "rudra network watchdog not installed (mdops harden-rudra)"
+    remote rudra lock list 2>/dev/null | sed 's/^/  lock: /'
+  fi
+  if [ -n "$CLUSTER_WORK_ROOT" ] && route cluster >/dev/null; then
+    local u p; u=$(remote cluster usage "$CLUSTER_WORK_ROOT" 2>/dev/null); p=${u%% *}
+    if [ -z "$p" ]; then warn "cluster usage unknown"; elif [ "$p" -ge "$CLUSTER_QUOTA_STOP_PCT" ]; then bad "cluster storage $u — writes blocked"; fails=$((fails+1))
+    elif [ "$p" -ge "$CLUSTER_QUOTA_WARN_PCT" ]; then warn "cluster storage $u"; else ok "cluster storage $u"; fi
+    rssh cluster 'squeue -u $USER -h -o "%i %j %T %M" 2>/dev/null | head' | sed 's/^/  job: /'
+  elif [ -z "$CLUSTER_WORK_ROOT" ]; then warn "CLUSTER_WORK_ROOT not set yet (storage plan pending — docs/storage.md)"; fi
+  [ -f "$STATE/journal-offline.md" ] && warn "offline journal entries waiting in state/journal-offline.md"
+  [ $fails = 0 ] && say "${c_grn}doctor: OK${c_off}" || say "${c_red}doctor: $fails failure(s)${c_off}"
+  return $fails; }
+
+
+cmd_keepalive() { # install | uninstall | status | tick  — macOS launchd agent keeping the rudra (and cluster) masters open
+  local plist="$HOME/Library/LaunchAgents/au.anu.mdops.keepalive.plist" log="$STATE/keepalive.log" a
+  case "${1:-status}" in
+    tick)
+      for a in md-rudra md-cluster; do
+        ssh -O check "$a" >/dev/null 2>&1 && continue
+        if to 40 ssh -o BatchMode=yes -o ConnectTimeout=12 -fN "$a" >/dev/null 2>&1; then echo "$(date '+%F %T') reopened $a" >> "$log"
+        else echo "$(date '+%F %T') $a down (no route or needs a human login)" >> "$log"; fi
+      done
+      [ -f "$log" ] && [ "$(wc -l < "$log")" -gt 2000 ] && tail -n 500 "$log" > "$log.tmp" && mv "$log.tmp" "$log" ;;
+    install)
+      mkdir -p "$HOME/Library/LaunchAgents"
+      cat > "$plist" <<EOF2
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>au.anu.mdops.keepalive</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$ROOT/bin/mdops</string><string>keepalive</string><string>tick</string></array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>$STATE/keepalive.err</string>
+</dict></plist>
+EOF2
+      launchctl unload "$plist" 2>/dev/null; launchctl load -w "$plist" && ok "keepalive installed: re-opens md-rudra / md-cluster within 60s of a drop (log: state/keepalive.log)" ;;
+    uninstall) launchctl unload -w "$plist" 2>/dev/null; rm -f "$plist"; ok "keepalive removed" ;;
+    *) [ -f "$plist" ] && launchctl list 2>/dev/null | grep -q au.anu.mdops.keepalive && ok "keepalive running" || warn "keepalive not installed (mdops keepalive install)"
+       tail -n 5 "$log" 2>/dev/null ;;
+  esac; }
+
+
+cmd_profile() { # apply FILE: merge KEY=VALUE lines into config/hosts.conf (backup kept)
+  [ "$1" = apply ] && [ -f "$2" ] || die "mdops profile apply FILE"
+  [ -f "$CONF" ] || die "run mdops discover first"
+  cp "$CONF" "$CONF.bak.$(date +%Y%m%d-%H%M%S)"
+  local k line
+  grep -E '^[A-Z_][A-Z0-9_]*=' "$2" | while IFS= read -r line; do
+    k=${line%%=*}
+    if grep -q "^$k=" "$CONF"; then awk -v k="$k" -v l="$line" 'index($0,k"=")==1{print l; next}{print}' "$CONF" > "$CONF.tmp" && mv "$CONF.tmp" "$CONF"
+    else echo "$line" >> "$CONF"; fi
+    echo "set $line"
+  done
+  . "$CONF"; cmd_sshconfig; }
+
+# ---------- discovery (read-only everywhere) ----------
+ssh_g() { ssh -G "$1" 2>/dev/null | awk -v k="$2" '$1==k{ $1=""; sub(/^ /,""); print }'; }
+
+cmd_discover() {
+  local ts out rq cq rh ch ru cu rp cp rj cj rid cid tsline rts
+  ts=$(date +%Y%m%d-%H%M%S); out="$STATE/discovery/$ts"; mkdir -p "$out"
+  say "== MatterDoor discovery (read-only). Report -> $out"
+  {
+    echo "===== mac"; sw_vers 2>/dev/null; uname -m; df -h "$HOME" | tail -1
+    echo "ssh: $(ssh -V 2>&1)"; echo "rsync: $(rsync --version 2>/dev/null | head -1)"
+    for t in git tmux mosh python3 brew conda code claude codex; do printf '%-8s %s\n' "$t" "$(command -v $t || echo -)"; done
+    echo "===== tailscale"; [ -n "$TS_BIN" ] && { to 10 "$TS_BIN" status 2>&1; to 25 "$TS_BIN" netcheck 2>&1 | head -25; } || echo "no tailscale cli"
+    echo "===== globalprotect"; ls -d /Applications/GlobalProtect.app 2>/dev/null || echo "not installed"
+    echo "===== ssh hosts in ~/.ssh/config (names + resolved endpoints only; no keys)"
+    for f in "$HOME/.ssh/config" "$HOME"/.ssh/config.d/*; do [ -f "$f" ] && awk 'tolower($1)=="host"{for(i=2;i<=NF;i++) print $i}' "$f"; done | grep -v '[*?!]' | sort -u | while read -r hh; do
+      printf '%-22s host=%s user=%s port=%s jump=%s id=%s\n' "$hh" "$(ssh_g "$hh" hostname)" "$(ssh_g "$hh" user)" "$(ssh_g "$hh" port)" "$(ssh_g "$hh" proxyjump)" "$(ssh_g "$hh" identityfile | head -1)"
+    done
+  } > "$out/mac.txt" 2>&1
+  sed -n '/===== ssh hosts/,$p' "$out/mac.txt"
+  tsline=$(grep -i rudra "$out/mac.txt" | grep -E '^100\.' | head -1)
+  [ -n "$tsline" ] && say "Tailscale sees rudra: $tsline" || say "Tailscale: no device named rudra on your tailnet (yet)"
+
+  rq=$(awk '{print $1}' < <(sed -n '/===== ssh hosts/,$p' "$out/mac.txt" | grep -i rudra) | head -1)
+  printf 'SSH name (alias or user@host) that reaches rudra [%s]: ' "${rq:-none found}"; read -r rid </dev/tty; rid=${rid:-$rq}
+  cq=$(sed -n '/===== ssh hosts/,$p' "$out/mac.txt" | grep -E 'host=[^ ]*(cecs\.anu\.edu\.au|cluster)' | grep -vi rudra | awk '{print $1}' | head -1)
+  printf 'SSH name (alias or user@host) that reaches the cluster [%s]: ' "${cq:-none found}"; read -r cid </dev/tty; cid=${cid:-$cq}
+  [ -n "$rid" ] && [ -n "$cid" ] || die "need both names; re-run mdops discover"
+
+  rh=$(ssh_g "$rid" hostname); ru=$(ssh_g "$rid" user); rp=$(ssh_g "$rid" port); rj=$(ssh_g "$rid" proxyjump)
+  ch=$(ssh_g "$cid" hostname); cu=$(ssh_g "$cid" user); cp=$(ssh_g "$cid" port); cj=$(ssh_g "$cid" proxyjump)
+  rts=$(printf '%s' "$tsline" | awk '{print $1}')
+  case "$rh" in 100.*) rts=${rts:-$rh};; esac
+  say "rudra   -> $ru@$rh:$rp ${rj:+(jump $rj)} ${rts:+tailscale=$rts}"
+  say "cluster -> $cu@$ch:$cp ${cj:+(jump $cj)}"
+
+  local mux="-o ControlMaster=auto -o ControlPath=$HOME/.ssh/cm/%C -o ControlPersist=4h -o ServerAliveInterval=15 -o ConnectTimeout=15"
+  mkdir -p "$HOME/.ssh/cm"; chmod 700 "$HOME/.ssh/cm"
+  say "== probing rudra (type a password/OTP if prompted; the connection is then reused)"
+  # shellcheck disable=SC2086
+  ssh $mux "$rid" "env MD_ROLE=rudra MD_PEER_HOST=$(q "$ch") MD_PEER_USER=$(q "$cu") bash -s" < "$ROOT/remote/probe.sh" > "$out/rudra.txt" 2>&1 \
+    && ok "rudra probed ($(wc -l < "$out/rudra.txt") lines)" || bad "rudra probe failed — see $out/rudra.txt"
+  say "== probing cluster"
+  # shellcheck disable=SC2086
+  if ssh $mux "$cid" "env MD_ROLE=cluster MD_PATTERNS=$(q "${MD_PATTERNS:-matterdoor rudra}") MD_PROJECT_ROOT=$(q "$CLUSTER_PROJECT_ROOT") bash -s" < "$ROOT/remote/probe.sh" > "$out/cluster.txt" 2>&1; then ok "cluster probed directly ($(wc -l < "$out/cluster.txt") lines)"
+  elif ssh $mux -J "$rid" "$cid" "env MD_ROLE=cluster MD_PATTERNS=$(q "${MD_PATTERNS:-matterdoor rudra}") MD_PROJECT_ROOT=$(q "$CLUSTER_PROJECT_ROOT") bash -s" < "$ROOT/remote/probe.sh" > "$out/cluster.txt" 2>&1; then ok "cluster probed via rudra"
+  else bad "cluster probe failed — see $out/cluster.txt"; fi
+
+  if [ ! -f "$CONF" ] || [ "$1" = --regen ]; then
+    [ -f "$CONF" ] && cp "$CONF" "$CONF.bak.$ts"
+    local rids cids
+    rids=$(ssh -G "$rid" | awk '$1=="identityfile"{print $2}' | while read -r f; do g=${f/#\~/$HOME}; [ -f "$g" ] && printf '%s ' "$f"; done)
+    cids=$(ssh -G "$cid" | awk '$1=="identityfile"{print $2}' | while read -r f; do g=${f/#\~/$HOME}; [ -f "$g" ] && printf '%s ' "$f"; done)
+    local lan=$rh; case "$rh" in 100.*) lan=;; esac
+    cat > "$CONF" <<EOF
+# MatterDoor portal config — generated by mdops discover $ts from your aliases '$rid' and '$cid'.
+# Plain shell assignments. After editing run: mdops sshconfig && mdops doctor
+RUDRA_USER=$(q "$ru")
+RUDRA_TS_HOST=$(q "$rts")        # Tailscale IP of rudra (primary route); empty until rudra joins the tailnet
+RUDRA_LAN_HOST=$(q "$lan")       # campus hostname/IP (fallback route: on campus or GlobalProtect)
+RUDRA_PORT=$(q "${rp:-22}")
+RUDRA_IDENTITIES=$(q "${rids% }")
+CLUSTER_USER=$(q "$cu")
+CLUSTER_HOST=$(q "$ch")
+CLUSTER_PORT=$(q "${cp:-22}")
+CLUSTER_IDENTITIES=$(q "${cids% }")
+CLUSTER_ORIG_JUMP=$(q "$cj")     # jump host your original alias used, kept for md-cluster-direct
+
+# ---- storage (set by the lead agent after reviewing discovery; empty = feature refuses to run)
+RUDRA_DATA_ROOT=                # canonical MatterDoor data + harvested runs on rudra
+RUDRA_ARCHIVE_ROOT=             # where mdops archive writes .tar.zst
+CLUSTER_WORK_ROOT=              # the ONLY cluster area mdops writes to (stage/, runs/)
+CLUSTER_GROUP_ROOT=             # shared group dir: read-mostly, never pruned by mdops
+CLUSTER_QUOTA_WARN_PCT=80
+CLUSTER_QUOTA_STOP_PCT=90
+
+# ---- slurm defaults (from discovery)
+SLURM_PARTITION=                # GPU partition
+SLURM_CPU_PARTITION=            # set from discovery sinfo if CPU jobs need a named partition
+SLURM_ACCOUNT=
+SLURM_QOS=
+SLURM_GRES=                     # typed GRES only, e.g. gpu:3090:1 (untyped GPU requests are refused)
+
+# ---- project profile (apply with: mdops profile apply <project>/ops/mdops.conf)
+CLUSTER_PROJECT_ROOT=           # project git checkout on the cluster
+CLUSTER_SUBMIT_GUARD=           # project GPU submit guard, relative to CLUSTER_PROJECT_ROOT
+EOF
+    ok "wrote $CONF"; . "$CONF"; cmd_sshconfig
+  else say "config exists; not overwritten (mdops discover --regen to rebuild it)"; fi
+  { echo "# discovery $ts"; echo; for f in mac rudra cluster; do echo "- $f.txt: $(wc -l < "$out/$f.txt" 2>/dev/null) lines"; done; } > "$out/README.md"
+  ln -sfn "$out" "$STATE/discovery/latest"
+  say; say "Discovery saved to $out  (latest: state/discovery/latest)"
+  say "Next: tell the lead agent 'discovery done' — it reviews the report and sets the storage plan."; }
+
+# ---------- dispatch ----------
+c=${1:-help}; shift 2>/dev/null
+case "$c" in
+  help|-h|--help) cmd_help ;;
+  discover) cmd_discover "$@" ;;  sshconfig) cmd_sshconfig ;;  doctor) cmd_doctor ;;
+  net) cmd_net "$@" ;;  login) cmd_login "$@" ;;  route) cmd_route "$@" ;;
+  ssh) cmd_ssh "$@" ;;  open) cmd_open "$@" ;;  tunnel) cmd_tunnel "$@" ;;
+  lock) cmd_lock "$@" ;;  journal) cmd_journal "$@" ;;
+  run) cmd_run "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
+  profile) cmd_profile "$@" ;;
+  submit) cmd_submit "$@" ;;  census) cmd_census "$@" ;;  keepalive) cmd_keepalive "$@" ;;
+  quota) cmd_quota ;;  stage) cmd_stage "$@" ;;  harvest) cmd_harvest "$@" ;;  prune) cmd_prune "$@" ;;
+  link-rudra-cluster) cmd_link_rudra_cluster "$@" ;;  harden-rudra) cmd_harden_rudra "$@" ;;
+  clean) cmd_clean "$@" ;;  archive) cmd_archive "$@" ;;
+  version) git -C "$ROOT" log -1 --format='%h %cs' 2>/dev/null || echo unversioned ;;
+  *) die "unknown command '$c' — mdops help" ;;
+esac

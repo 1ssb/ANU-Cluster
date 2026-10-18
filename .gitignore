@@ -1,0 +1,6 @@
+# machine-specific: never commit (hostnames, usernames, discovery reports, locks)
+config/hosts.conf
+config/*.bak.*
+state/
+*.tmp
+.DS_Store
