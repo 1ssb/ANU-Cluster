@@ -39,6 +39,7 @@ and knows everything else from there.
 | a login that needs your password or OTP | `mtd login rudra` or `mtd login cluster` |
 | one-time rudra hardening (sudo) | `mtd harden-rudra` |
 | health | `mtd doctor` |
+| rudra is off or unreachable for a while | `mtd hub use cluster` (everything continues on the cluster; back with `mtd hub use rudra`) |
 
 ## Never lost
 - **Code, documents and environment snapshots** are committed and mirrored to
@@ -47,7 +48,10 @@ and knows everything else from there.
   approval it also pushes to GitHub.
 - **Data is never uploaded.** It is described, with locations and checksums,
   in `into_the_unknown/control/registry/resources.yaml`.
-- **The handoff** is versioned on rudra and mirrored into the project repo.
+- **The handoff** is versioned on the hub (rudra, or the cluster without
+  rudra) and mirrored into the project repo.
+- **Without rudra** backups go to GitHub only, and results are harvested to
+  `data/runs/` on this Mac.
 
 ## Recover
 - **Something is broken:** run `mtd doctor`, then see

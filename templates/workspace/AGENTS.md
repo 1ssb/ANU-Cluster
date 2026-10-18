@@ -52,7 +52,7 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
 | **read the internet**: papers, docs, code. Cite the URL for every fact you use. | **upload** anything: `mtd push`, `stage --yes`, `agent-key authorize`, sending files, posting | compute, downloads or scans on the cluster login node |
 | **write documentation**: `control/` files, `docs/`, the journal, the handoff, the registry | launch a GPU job that is not `approved` in `jobs.yaml` | use ZeroNav material (`research/` D-series, `zeronav*`, `d14x*`, `frontier_review_*`) |
 | commit locally (`mtd save`), dry runs, read-only checks | change mission, goals, decisions or guards (the PI decides; you record) | edit frozen paths, commit data, rewrite git history |
-| launch declared CPU jobs and approved GPU jobs | anything irreversible you are unsure about | stop, kill or steal another agent's runs, locks or files; take over the PI's screen |
+| launch declared CPU jobs and approved GPU jobs; `mtd hub use cluster` when rudra is down | anything irreversible you are unsure about | stop, kill or steal another agent's runs, locks or files; take over the PI's screen |
 | **ask for what you cannot access**: `mtd ask "<what> — <why>"`, then ask in chat and move to other work | | type or store passwords, OTPs or tokens |
 
 ## 3. Working cadence: balance progress, compute and record-keeping
@@ -88,9 +88,16 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
 - **Where to run:**
   - **rudra (RTX 4090)**: development, smoke tests, single-GPU jobs up to
     about 8 h, downloads, preprocessing, rendering.
-  - **Cluster**: multi-GPU, long or array jobs. Use typed GRES through
-    `mtd submit cluster/JOB.sh --job job:<id>`; the project's GPU guard is
-    applied.
+  - **Cluster**: multi-GPU, long or array jobs, and everything when rudra is
+    down.
+    - GPU: copy `into_the_unknown/cluster/md_gpu_smoke_3090.sh` to
+      `cluster/md_<goal>_<what>_<gpu>.sh` and replace only its WORK block.
+      Commit and push it, run `mtd sync cluster`, then
+      `mtd submit cluster/<script> --job job:<id>`.
+    - The project's GPU guard (typed GRES) is applied, and the run gets a run
+      id. Outputs and the log land in `$MD_OUT_DIR`; bring them back with
+      `mtd harvest`.
+    - CPU: `mtd run cluster --no-gpu --job job:<id> --dir <repo> -- CMD`.
 - **Declare before running.** Add the job to
   `control/registry/jobs.yaml` with its goal, host, kind, entry, inputs,
   outputs and `status: proposed`. CPU jobs may run as proposed. GPU jobs need
@@ -105,7 +112,8 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
   - Stage only the data subset a job needs. Harvest and verify promptly; prune
     with approval.
 - **Check before big moves.** Run `mtd status` (GPU, runs, jobs, storage,
-  locks, asks, routes). Writes to the cluster stop at 90% storage.
+  locks, asks, routes). Cluster writes stop when less than 40 GB is free
+  (`CLUSTER_MIN_FREE_GB`). Today that leaves only about 37 GB.
 - **Record usage.** At finish, journal the host, wall time and GPU count, and
   the result location.
 
@@ -120,7 +128,8 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
     mirror.
   - **Downloads:** on this Mac, then `mtd stage PATH --from mac --yes …`. The
     cluster login node never downloads, and compute nodes run offline.
-  - **GPU:** `mtd submit cluster/JOB.sh --job …` with typed GRES.
+  - **GPU:** `mtd submit cluster/md_….sh --job …`, using the template above
+    (a 3090 replaces the 4090).
   - **CPU:** `mtd run cluster --no-gpu …`.
   - **Results:** `mtd harvest ID --to mac` (this is the default whenever rudra
     is offline). Results are verified by file count and bytes.

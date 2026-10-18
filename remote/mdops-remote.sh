@@ -128,9 +128,7 @@ run_slurm() { # NAME DIR ALLOW_DIRTY AGENT WORK_ROOT STOP_PCT SBATCH_ARGS... -- 
   [ -n "$work" ] || die "CLUSTER_WORK_ROOT not set in config/hosts.conf"
   command -v sbatch >/dev/null || die "sbatch not found on $(hostname -s)"
   dir=$(cd "$dir" 2>/dev/null && pwd) || die "no such dir: $2"
-  local u fr minfree=${stop#*:}; stop=${stop%%:*}; [ "$minfree" = "$stop" ] && minfree=0; u=$(usage "$work"); fr=$(printf '%s' "$u" | sed -n 's/.*free=\([0-9]*\)G.*/\1/p')
-  [ "${u%% *}" -lt "$stop" ] || die "storage at ${u%% *}% (stop at $stop%): $u — harvest+prune first"
-  [ "${fr:-0}" -ge "$minfree" ] || die "only ${fr}G free on the work root (minimum ${minfree}G): $u — free space first (mtd census, then archive/prune with approval)"
+  local u; u=$(storage_gate "$work" "$stop") || exit 2
   local id rd out; id=$(new_run_id cluster "$name"); rd="$STATE/runs/$id"; out="$work/runs/$id"
   git_prov "$dir" "$allow" "$rd"; mkdir -p "$rd" "$out"
   printf '%q ' "$@" > "$rd/cmd.txt"
@@ -158,6 +156,39 @@ run_slurm() { # NAME DIR ALLOW_DIRTY AGENT WORK_ROOT STOP_PCT SBATCH_ARGS... -- 
   echo "RUN $id"; echo "job: $jid"; echo "out: $out"; echo "storage now: $u"
 }
 
+storage_gate() { # WORK "PCT:MINFREE_GB" -> prints usage; fails if the work root is too full to write
+  local work=$1 stop=${2%%:*} minfree=${2#*:} u fr; [ "$minfree" = "$2" ] && minfree=0
+  mkdir -p "$work" 2>/dev/null; u=$(usage "$work"); fr=$(printf '%s' "$u" | sed -n 's/.*free=\([0-9]*\)G.*/\1/p')
+  [ "${u%% *}" -lt "$stop" ] 2>/dev/null || [ "$stop" -ge 100 ] || die "storage at ${u%% *}% (stop at $stop%): $u — harvest+prune first"
+  [ "${fr:-0}" -ge "$minfree" ] || die "only ${fr:-?}G free on the work root (minimum ${minfree}G): $u — free space first (mtd census, then archive/prune with approval)"
+  printf '%s' "$u"; }
+
+run_submit() { # NAME PROJECT_DIR SCRIPT GUARD ALLOW_DIRTY AGENT WORK "PCT:MINFREE": GPU job through the project's own guard, with a run record
+  local name=$1 dir=$2 script=$3 guard=$4 allow=$5 agent=$6 work=$7 stop=$8 u id rd out o rc jid log
+  [ -n "$work" ] || die "CLUSTER_WORK_ROOT not set in config/hosts.conf"
+  command -v sbatch >/dev/null || die "sbatch not found on $(hostname -s)"
+  dir=$(cd "$dir" 2>/dev/null && pwd) || die "no such dir: $2"; [ -f "$dir/$script" ] || die "no job script $dir/$script (commit + push it, then: mtd sync cluster)"
+  u=$(storage_gate "$work" "$stop") || exit 2
+  id=$(new_run_id cluster "$name"); rd="$STATE/runs/$id"; out="$work/runs/$id"
+  git_prov "$dir" "$allow" "$rd"; mkdir -p "$rd" "$out"; cp "$dir/$script" "$rd/job.sbatch"; cp "$rd/job.sbatch" "$out/job.sbatch"
+  log=$(sed -n 's/^#SBATCH[[:space:]]\+\(--output=\|-o[[:space:]]*\)\([^[:space:]]*\).*/\2/p' "$dir/$script" | head -1)
+  local envx=()   # the run's MD_* variables must reach the job; logs land in the run dir unless the script names its own
+  grep -Eq '^#SBATCH[[:space:]]+--export' "$dir/$script" || envx+=(SBATCH_EXPORT=ALL)
+  [ -n "$log" ] || envx+=("SBATCH_OUTPUT=$out/slurm-%j.log" "SBATCH_ERROR=$out/slurm-%j.log")
+  { echo "run_id=$id"; echo "host=cluster"; echo "kind=gpu-submit"; echo "dir=$dir"; echo "script=$script"; echo "commit=$COMMIT"; echo "dirty=$DIRTY"; echo "agent=$agent"
+    echo "job_spec=${MD_JOB:-}"; echo "out_dir=$out"; echo "submitted=$(now)"; } > "$rd/meta.env"
+  [ -f "$rd/dirty.patch" ] && cp "$rd/dirty.patch" "$out/"
+  o=$(cd "$dir" && env MD_RUN_ID="$id" MD_RUN_DIR="$rd" MD_OUT_DIR="$out" MD_WORK="$work" MD_AGENT="$agent" MD_JOB="${MD_JOB:-}" \
+        ${envx[@]+"${envx[@]}"} bash "$guard" --submit "$script" 2>&1); rc=$?
+  printf '%s\n' "$o"
+  jid=$(printf '%s' "$o" | sed -n 's/.*Submitted batch job \([0-9][0-9]*\).*/\1/p' | head -1)
+  if [ "$rc" != 0 ] || [ -z "$jid" ]; then echo "submit=failed" >> "$rd/meta.env"; rmdir "$out" 2>/dev/null || true; die "guard refused or sbatch failed; nothing queued (record kept: $rd)"; fi
+  [ -n "$log" ] && log=$(printf '%s' "$log" | sed "s/%j/$jid/g; s/%A/$jid/g; s/%x/${name}/g") || log="$out/slurm-$jid.log"
+  { echo "job=$jid"; echo "log=$log"; } >> "$rd/meta.env"; cp "$rd/meta.env" "$out/meta.env"
+  printf '%s\t%s\tgpu\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" cluster "$name" "$COMMIT" "$DIRTY" "$agent" "$(now)" "$jid" >> "$INDEX"
+  echo "RUN $id"; echo "job: $jid"; echo "out: $out"; echo "log: $log"; echo "storage now: $u"
+}
+
 runs() { tail -n "${1:-20}" "$INDEX" | column -t -s $'\t' 2>/dev/null || tail -n "${1:-20}" "$INDEX"; }
 
 run_status() { # RUN_ID
@@ -168,7 +199,8 @@ run_status() { # RUN_ID
   local job; job=$(sed -n 's/^job=//p' "$rd/meta.env")
   [ -n "$job" ] && command -v squeue >/dev/null && squeue -j "$job" -h -o 'slurm_state=%T elapsed=%M node=%N' 2>/dev/null
   tmux has-session -t "md-$1" 2>/dev/null && echo "tmux=running"
-  echo "--- log tail"; tail -n 15 "$rd/log.txt" 2>/dev/null || ls -t "$out"/slurm-*.log 2>/dev/null | head -1 | xargs -r tail -n 15
+  local lg; lg=$(sed -n 's/^log=//p' "$rd/meta.env")
+  echo "--- log tail"; tail -n 15 "$rd/log.txt" 2>/dev/null || { [ -n "$lg" ] && tail -n 15 "$lg" 2>/dev/null; } || ls -t "$out"/slurm-*.log 2>/dev/null | head -1 | xargs -r tail -n 15
 }
 
 # ---------- prune harvested cluster run dirs (only inside WORK_ROOT/runs) ----------
@@ -254,6 +286,8 @@ case "$sub" in
   journal-tail) tail -n "${1:-30}" "$STATE/journal.md" 2>/dev/null || echo "(empty journal)";;
   run-local) run_local "$@" ;;
   run-slurm) run_slurm "$@" ;;
+  run-submit) run_submit "$@" ;;
+  storage-gate) storage_gate "$@" ;;
   runs)     runs "$@" ;;
   run-status) run_status "$@" ;;
   usage)    usage "$@" ;;

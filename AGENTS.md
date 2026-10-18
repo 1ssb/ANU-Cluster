@@ -80,9 +80,10 @@ Routes are picked automatically, in this order:
 - **GPU jobs on the cluster** go only through `mdops submit cluster/JOB.sh`,
   which uses the project guard (typed GRES, `--nodes=1 --ntasks=1`,
   `gpu_job_guard.sh` sourced). CPU jobs use `mdops run cluster --no-gpu ...`.
-- **Downloads** (datasets, weights, wheels, conda packages) happen on rudra.
-  Then `mdops stage` copies them to the cluster work root. Cluster jobs run
-  with HF, pip and W&B offline.
+- **Downloads** (datasets, weights, wheels, conda packages) happen on rudra,
+  or on the Mac when rudra is down. Then `mdops stage` (`--from mac`) copies
+  them to the cluster work root. Cluster jobs run with HF, pip and W&B
+  offline.
 - **Deleting:**
   - `mdops prune` removes only cluster run dirs that `harvest` has verified.
   - `mdops archive` keeps originals unless `--remove-original` is given and
@@ -115,23 +116,26 @@ Routes are picked automatically, in this order:
 - `CLUSTER_PROJECT_ROOT`: the project git checkout on the cluster (job scripts live here).
 
 Data flows one way:
-1. canonical (rudra) → `stage` → cluster work root
+1. canonical (rudra, or the Mac without rudra) → `stage` → cluster work root
 2. Slurm job writes to `$MD_OUT_DIR`
-3. `harvest` brings outputs back to rudra and verifies them
+3. `harvest` brings outputs back to rudra (`--to mac` without rudra) and
+   verifies them
 4. `prune` then frees the cluster copy
 
 Code flows through GitHub. Commit and push, then `git pull` on the host.
 
 ## 4. Coordination between agents
-- **Locks** (`mdops lock acquire NAME --ttl MIN`) are atomic and live on
-  rudra. Use one per shared resource: `paper`, `data-<name>`, `cluster-submit`,
-  `rudra-cleanup`. If one is BUSY, wait or pick other work. Never `--force`
-  without the human.
+- **Locks** (`mdops lock acquire NAME --ttl MIN`) are atomic and live on the
+  hub (rudra, or the cluster work root in cluster-only mode).
+  - Use one per shared resource: `paper`, `data-<name>`, `cluster-submit`,
+    `rudra-cleanup`.
+  - If one is BUSY, wait or pick other work.
+  - Never `--force` without the human.
 - **The rudra GPU** is serialised automatically: `mdops run rudra` queues on a
   GPU lock, so runs wait instead of colliding.
 - **Journal:** `mdops journal "..."` after anything that matters (launched,
-  finished, found a problem, changed config). If rudra is down, entries are
-  saved locally.
+  finished, found a problem, changed config). If the hub is down, entries are
+  saved locally and merged at the next entry that reaches the hub.
 - **Run records:** `mdops runs`, `mdops status RUN_ID`. Logs and metadata are
   in `~/mdops-state/runs/<id>/` on the host.
 
@@ -162,7 +166,8 @@ mdops lock acquire|release|list NAME [--ttl MIN]
 mdops journal "msg" | --tail N
 mdops run rudra --job job:ID --dir REPO [--allow-dirty] [--no-gpu] -- CMD... tmux + GPU queue on rudra
 mdops run cluster --job job:ID --dir REPO --no-gpu [--time --mem --cpus] -- CMD   CPU Slurm job
-mdops submit cluster/JOB.sh --job job:ID [--check]                             GPU job via the project guard
+mdops submit cluster/JOB.sh --job job:ID [--check] [--allow-dirty]             GPU job via the project guard; run record + $MD_OUT_DIR
+mtd sync cluster                     fast-forward the cluster's project checkout (where job scripts live); never switches branch
 (agents: --job must be declared in control/registry/jobs.yaml; GPU jobs must be PI-approved)
 mdops runs [rudra|cluster] | mdops status RUN_ID | mdops cancel RUN_ID (own runs only)
 mdops quota | mdops census           storage usage (census = du inside a Slurm CPU job)

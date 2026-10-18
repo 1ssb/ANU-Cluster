@@ -13,6 +13,14 @@ moves between them. Nothing irreplaceable lives only on the cluster work root.
 | cluster node scratch | `/raid/$USER/...` on compute nodes | per-job temp | job-scoped, per the project contract |
 | Mac | the paper repo + small results | figures, tables, LaTeX | git |
 
+## Work root
+The project profile sets `CLUSTER_WORK_ROOT=/home/group/rudra-work/mdops`,
+inside the project's persistent root. `mtd setup` creates it with:
+- `stage/`: inputs;
+- `runs/<id>/`: outputs and logs;
+- `cache/`, `tmp/`;
+- `mdops-state/`: run records, plus the hub state in cluster-only mode.
+
 ## Limits and modes
 - **Cluster writes.** Cluster writes refuse when the work root has less than
   `CLUSTER_MIN_FREE_GB` free (default 40) or is above `CLUSTER_QUOTA_STOP_PCT`

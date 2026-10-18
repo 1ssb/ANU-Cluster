@@ -18,7 +18,7 @@ mkdir -p "$STATE" 2>/dev/null
 RUDRA_USER=; RUDRA_TS_HOST=; RUDRA_LAN_HOST=; RUDRA_PORT=22; RUDRA_IDENTITIES=
 CLUSTER_USER=; CLUSTER_HOST=; CLUSTER_PORT=22; CLUSTER_IDENTITIES=; CLUSTER_ORIG_JUMP=
 RUDRA_DATA_ROOT=; RUDRA_ARCHIVE_ROOT=; CLUSTER_WORK_ROOT=; CLUSTER_GROUP_ROOT=
-CLUSTER_QUOTA_WARN_PCT=95; CLUSTER_QUOTA_STOP_PCT=99; CLUSTER_MIN_FREE_GB=40
+CLUSTER_QUOTA_WARN_PCT=95; CLUSTER_QUOTA_STOP_PCT=100; CLUSTER_MIN_FREE_GB=40
 MD_HUB=rudra   # where coordination state lives (locks, journal, handoff, asks): rudra | cluster  (mtd hub use ...)
 SLURM_PARTITION=; SLURM_CPU_PARTITION=; SLURM_ACCOUNT=; SLURM_QOS=; SLURM_GRES=gpu:1
 CLUSTER_PROJECT_ROOT=; CLUSTER_SUBMIT_GUARD=
@@ -184,13 +184,17 @@ cmd_open() { # interactive: mosh+tmux to rudra when available (survives Wi-Fi ch
   [ "$h" = cluster ] && warn "cluster login node: edit/inspect only — compute goes through Slurm"
   ssh "$a" -t "tmux new-session -A -s $(q "$s") 2>/dev/null || exec \$SHELL -l"; }
 
-cmd_submit() { # SCRIPT --job ID [--check]: validated + submitted by the project's own guard
-  local s=$1 mode=--submit job=; shift; need_conf CLUSTER_PROJECT_ROOT CLUSTER_SUBMIT_GUARD; [ -n "$s" ] || die "mdops submit cluster/SOME_JOB.sh --job job:<id> [--check]"
-  while [ $# -gt 0 ]; do case "$1" in --check) mode=--check;; --job) job=$2; shift;; esac; shift; done
+cmd_submit() { # cluster/JOB.sh --job ID [--check] [--allow-dirty]: the project's own guard admits it; mdops adds the run record
+  local s=$1 mode=--submit job= allow=0 out rc rid jid; shift; need_conf CLUSTER_PROJECT_ROOT CLUSTER_SUBMIT_GUARD
+  [ -n "$s" ] || die "mtd submit cluster/SOME_JOB.sh --job job:<id> [--check] [--allow-dirty]"
+  while [ $# -gt 0 ]; do case "$1" in --check) mode=--check;; --job) job=$2; shift;; --allow-dirty) allow=1;; *) die "unknown option $1";; esac; shift; done
   job_gate "$job" gpu || exit 2
-  local out; out=$(rssh cluster "cd $(q "$CLUSTER_PROJECT_ROOT") && bash $(q "$CLUSTER_SUBMIT_GUARD") --check $(q "$s") && { [ $mode = --check ] || bash $(q "$CLUSTER_SUBMIT_GUARD") --submit $(q "$s"); }") ; local rc=$?
+  if [ $mode = --check ]; then rssh cluster "cd $(q "$CLUSTER_PROJECT_ROOT") && bash $(q "$CLUSTER_SUBMIT_GUARD") --check $(q "$s")"; return; fi
+  need_conf CLUSTER_WORK_ROOT; export MD_JOB="$job"
+  out=$(remote cluster run-submit "$(basename "$s" .sh)" "$CLUSTER_PROJECT_ROOT" "$s" "$CLUSTER_SUBMIT_GUARD" "$allow" "$AGENT" "$CLUSTER_WORK_ROOT" "$CLUSTER_QUOTA_STOP_PCT:$CLUSTER_MIN_FREE_GB" 2>&1); rc=$?
   printf '%s\n' "$out"
-  [ $rc = 0 ] && [ $mode = --submit ] && cmd_journal "submitted $s ($job) via project guard: $(printf '%s' "$out" | grep -o 'Submitted batch job [0-9]*')"
+  rid=$(printf '%s' "$out" | sed -n 's/^RUN //p'); jid=$(printf '%s' "$out" | sed -n 's/^job: //p')
+  [ $rc = 0 ] && [ -n "$rid" ] && cmd_journal "submitted GPU $s ($job) run $rid slurm $jid" >/dev/null && okl "submit $rid slurm $jid (mtd status $rid; results -> mtd harvest $rid)"
   return $rc; }
 
 cmd_census() { # sizes of the cluster roots, measured inside a Slurm CPU job (never on the login node)
@@ -215,7 +219,11 @@ cmd_lock() {
 cmd_journal() {
   if [ "$1" = --tail ]; then remote "$(hub)" journal-tail "${2:-30}"; return; fi
   [ -n "$*" ] || die 'mdops journal "what you did / what is running"'
-  { route "$(hub)" >/dev/null && remote "$(hub)" journal "$AGENT" "$*" 2>/dev/null; } || { printf -- '- %s [%s@mac OFFLINE] %s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/journal-offline.md"; warn "hub $(hub) unreachable — saved to state/journal-offline.md (merged on the next: mtd hub use ...)"; }; }
+  if route "$(hub)" >/dev/null && remote "$(hub)" journal "$AGENT" "$*" 2>/dev/null; then
+    [ -s "$STATE/journal-offline.md" ] && rssh "$(hub)" "cat >> $(hub_state_for "$(hub)")/journal.md" < "$STATE/journal-offline.md" && mv "$STATE/journal-offline.md" "$STATE/journal-offline.merged.$(date +%s)"
+    return 0; fi
+  printf -- '- %s [%s@mac OFFLINE] %s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/journal-offline.md"
+  warn "hub $(hub) unreachable — saved to state/journal-offline.md (merged into the hub journal at the next successful journal entry)"; }
 
 cmd_run() { # rudra|cluster --name N --dir D [opts] -- CMD...
   local h=$1; shift; local name= dir= allow=0 gpu=1 gpus=1 time=04:00:00 mem=32G cpus=8 part=$SLURM_PARTITION job=
@@ -260,7 +268,7 @@ cmd_quota() {
   [ -n "$CLUSTER_GROUP_ROOT" ] && { printf 'cluster group %s: ' "$CLUSTER_GROUP_ROOT"; remote cluster usage "$CLUSTER_GROUP_ROOT"; }
   [ -n "$RUDRA_DATA_ROOT" ] && { printf 'rudra data    %s: ' "$RUDRA_DATA_ROOT"; remote rudra usage "$RUDRA_DATA_ROOT"; }
   printf 'rudra home: '; remote rudra usage "~" 2>/dev/null || rssh rudra 'df -h ~ | tail -1'
-  say "${c_dim}(pct used, used, limit, source) — writes to the cluster stop at ${CLUSTER_QUOTA_STOP_PCT}%${c_off}"; }
+  say "${c_dim}(pct used, used, limit, source, free) — cluster writes stop below ${CLUSTER_MIN_FREE_GB}G free$([ "$CLUSTER_QUOTA_STOP_PCT" -lt 100 ] && echo " or at ${CLUSTER_QUOTA_STOP_PCT}%")${c_off}"; }
 
 retry_rsync() { # DRYFLAG SRC DST -> shell snippet run ON rudra: resumable, stall-detecting, 5 attempts
   printf 'ok=1; for i in 1 2 3 4 5; do rsync -a --partial --timeout=120 --human-readable --stats %s %s %s && { ok=0; break; }; echo "[mdops] rsync attempt $i failed; retrying in $((i*15))s"; sleep $((i*15)); done; [ $ok = 0 ]' "$1" "$(q "$2")" "$(q "$3")"; }
@@ -272,9 +280,7 @@ cmd_stage() { # PATH [--from rudra|mac] [--name N] [--yes]   -> cluster work/sta
   while [ $# -gt 0 ]; do case "$1" in --name) name=$2; shift;; --yes) yes=1;; --from) from=$2; shift;; esac; shift; done
   need_conf CLUSTER_WORK_ROOT; [ -n "$src" ] || die "mtd stage PATH [--from rudra|mac] [--name NAME] [--yes]"
   name=${name:-$(basename "$src")}
-  local u p fr; u=$(remote cluster usage "$CLUSTER_WORK_ROOT"); p=${u%% *}; fr=$(printf '%s' "$u" | sed -n 's/.*free=\([0-9]*\)G.*/\1/p')
-  [ "${p:-100}" -lt "$CLUSTER_QUOTA_STOP_PCT" ] || die "cluster storage at ${p}% — free space first (mtd census; archive/prune with approval)"
-  [ "${fr:-0}" -ge "$CLUSTER_MIN_FREE_GB" ] || die "only ${fr}G free on the cluster work root (minimum ${CLUSTER_MIN_FREE_GB}G) — free space first"
+  remote cluster storage-gate "$CLUSTER_WORK_ROOT" "$CLUSTER_QUOTA_STOP_PCT:$CLUSTER_MIN_FREE_GB" >/dev/null || exit 2
   if [ "$from" = mac ]; then
     [ -e "$src" ] || die "no such local path: $src"; local a n=-n i ok=1; a=$(route_or_die cluster) || exit 2
     [ $yes = 1 ] && { need_approval "upload mac:$src -> cluster stage/$name"; n=; }
@@ -445,9 +451,10 @@ cmd_doctor() {
     remote "$(hub)" lock list 2>/dev/null | sed 's/^/  lock: /'
   fi
   if [ -n "$CLUSTER_WORK_ROOT" ] && route cluster >/dev/null; then
-    local u p; u=$(remote cluster usage "$CLUSTER_WORK_ROOT" 2>/dev/null); p=${u%% *}
-    if [ -z "$p" ]; then warn "cluster usage unknown"; elif [ "$p" -ge "$CLUSTER_QUOTA_STOP_PCT" ]; then bad "cluster storage $u — writes blocked"; fails=$((fails+1))
-    elif [ "$p" -ge "$CLUSTER_QUOTA_WARN_PCT" ]; then warn "cluster storage $u"; else ok "cluster storage $u"; fi
+    local u p fr; u=$(remote cluster usage "$CLUSTER_WORK_ROOT" 2>/dev/null); p=${u%% *}; fr=$(printf '%s' "$u" | sed -n 's/.*free=\([0-9]*\)G.*/\1/p')
+    if [ -z "$p" ] || [ -z "$fr" ]; then warn "cluster usage unknown ($u) — mtd setup creates the work root"
+    elif [ "$fr" -lt "$CLUSTER_MIN_FREE_GB" ] || { [ "$CLUSTER_QUOTA_STOP_PCT" -lt 100 ] && [ "$p" -ge "$CLUSTER_QUOTA_STOP_PCT" ]; }; then bad "cluster storage $u — writes blocked (floor ${CLUSTER_MIN_FREE_GB}G free) -> mtd census, then archive/prune with approval"; fails=$((fails+1))
+    elif [ "$p" -ge "$CLUSTER_QUOTA_WARN_PCT" ]; then warn "cluster storage $u — $((fr - CLUSTER_MIN_FREE_GB))G usable before writes stop"; else ok "cluster storage $u"; fi
     rssh cluster 'squeue -u $USER -h -o "%i %j %T %M" 2>/dev/null | head' | sed 's/^/  job: /'
   elif [ -z "$CLUSTER_WORK_ROOT" ]; then warn "CLUSTER_WORK_ROOT not set yet (storage plan pending — docs/storage.md)"; fi
   [ -f "$STATE/journal-offline.md" ] && warn "offline journal entries waiting in state/journal-offline.md"
@@ -518,7 +525,9 @@ cmd_agent_key() {
       [ "$2" = --yes ] || die "adds the agent key to rudra (jump to the cluster only) and the cluster (no forwarding). Repeat with --yes."
       need_approval "upload agent public key to rudra + cluster authorized_keys"
       [ -f "$k.pub" ] || cmd_agent_key init; pub=$(cat "$k.pub"); need_conf CLUSTER_HOST
+      if route rudra >/dev/null; then
       rssh rudra "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qF $(q "$pub") ~/.ssh/authorized_keys || echo $(q "no-agent-forwarding,no-X11-forwarding,permitopen=\"$CLUSTER_HOST:$CLUSTER_PORT\" $pub") >> ~/.ssh/authorized_keys)" && ok "agent key authorised on rudra (may only jump to $CLUSTER_HOST)"
+      else warn "agent key: rudra offline — authorise there later (mtd setup)"; fi
       rssh cluster "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qF $(q "$pub") ~/.ssh/authorized_keys || echo $(q "no-agent-forwarding,no-X11-forwarding,no-port-forwarding $pub") >> ~/.ssh/authorized_keys)" && ok "agent key authorised on cluster (no forwarding)" ;;
     use) [ -f "$k" ] || die "no agent key in $STATE/agent (run on the Mac: mdops agent-key init && mdops agent-key authorize --yes)"
          mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"; cp "$k" "$HOME/.ssh/mdops_agent_ed25519"; chmod 600 "$HOME/.ssh/mdops_agent_ed25519"
@@ -647,7 +656,19 @@ cmd_check() { # registry + guard + routes + asks, one line each
   l=$(remote_ro "$(hub)" ask-list 2>/dev/null | grep -c '^#'); [ "${l:-0}" -gt 0 ] && echo "WARN asks $l open (mtd ask --list)" || okl "asks 0 open"
   return $rc; }
 
+sync_cluster() { # fast-forward the cluster's project checkout (job scripts are submitted from there); never switches branch
+  need_conf CLUSTER_PROJECT_ROOT; local o
+  o=$(rssh cluster "cd $(q "$CLUSTER_PROJECT_ROOT") || exit 3; b=\$(git rev-parse --abbrev-ref HEAD); d=\$(git status --porcelain --untracked-files=no | wc -l)
+    timeout 60 git fetch -q origin \"\$b\" 2>/dev/null || { echo \"FAIL fetch \$b\"; exit 1; }
+    set -- \$(git rev-list --left-right --count HEAD...FETCH_HEAD); echo \"branch=\$b head=\$(git rev-parse --short HEAD) dirty=\$d ahead=\$1 behind=\$2\"
+    if [ \"\$2\" -gt 0 ] && [ \"\$1\" = 0 ] && [ \"\$d\" = 0 ]; then git merge -q --ff-only FETCH_HEAD && echo \"ff=\$(git rev-parse --short HEAD)\"; fi" 2>&1)
+  case "$o" in *"ff="*) okl "sync cluster checkout $(printf '%s' "$o" | tr '\n' ' ')";;
+    *"behind=0"*) okl "sync cluster checkout up to date: $(printf '%s' "$o" | tr '\n' ' ')";;
+    *branch=*) fail "sync cluster checkout not fast-forwarded: $(printf '%s' "$o" | tr '\n' ' ') -> dirty or diverged: ask the PI (never reset it)"; return 1;;
+    *) fail "sync cluster checkout: ${o:-unreachable} -> mtd doctor (the login node may lack GitHub access: mtd ask)"; return 1;; esac; }
+
 cmd_sync() { # fetch + fast-forward every workspace repo; never merges, never discards
+  [ "$1" = cluster ] && { sync_cluster; return; }
   local r d b up ahead behind dirty rc=0
   for r in $WS_REPOS; do d="$WORKSPACE/$r"; [ -d "$d/.git" ] || { fail "sync $r missing -> rerun bootstrap"; rc=1; continue; }
     to 120 git -C "$d" fetch -q --prune origin 2>/dev/null || { fail "sync $r fetch failed (network/auth) -> retry later or mtd ask"; rc=1; continue; }
@@ -788,24 +809,38 @@ cmd_resources() { # everything currently in use, compactly
   echo "routes:  rudra=$(route rudra || echo DOWN) cluster=$(route cluster || echo DOWN)"; }
 
 
-cmd_setup() { # finish or repair the installation; human at a terminal only
+pubkey() { ls "$HOME"/.ssh/id_ed25519.pub "$HOME"/.ssh/id_rsa.pub "$HOME"/.ssh/id_ecdsa.pub 2>/dev/null | head -1; }
+cmd_setup() { # finish or repair the installation; PI at a terminal only. Works with or without rudra.
   [ "$AGENT" = human ] && [ -t 0 ] || die "mtd setup is for the PI at a terminal"
-  local rc=0 out ans
-  if ! route rudra >/dev/null; then fail "setup rudra: key login not working -> run: ssh-copy-id rudra   (type rudra's password once), then: mtd setup"; return 1; fi
-  route cluster >/dev/null || { fail "setup cluster unreachable -> run: ssh-copy-id anu   (or mtd login cluster), then: mtd setup"; return 1; }
-  okl "setup routes rudra=$(route rudra) cluster=$(route cluster)"
+  local rc=0 out ans rud=1 k; k=$(pubkey); k=${k:-~/.ssh/id_ed25519.pub}
+  [ -f "$CTRL/mdops.conf" ] && cmd_profile apply "$CTRL/mdops.conf" >/dev/null && . "$CONF" && okl "setup project profile applied (work root ${CLUSTER_WORK_ROOT:-unset}, floor ${CLUSTER_MIN_FREE_GB}G free)"
+  route cluster >/dev/null || { fail "setup cluster unreachable -> run: ssh-copy-id -f -i $k anu   (or: mtd login cluster), then: mtd setup"; return 1; }
+  if ! route rudra >/dev/null; then rud=0
+    fail "setup rudra: key login not working -> when rudra is on: ssh-copy-id -f -i $k rudra   (type rudra's password once), then: mtd setup"
+    if [ "$(hub)" = rudra ]; then printf 'Carry on without rudra for now (cluster-only mode; back with: mtd hub use rudra)? [Y/n] '; read -r ans </dev/tty
+      case "$ans" in n|N|no) return 1;; esac; cmd_hub use cluster || return 1; fi
+  fi
+  okl "setup routes rudra=$([ $rud = 1 ] && route rudra || echo offline) cluster=$(route cluster) hub=$(hub)"
+  if [ -n "$CLUSTER_WORK_ROOT" ]; then
+    rssh cluster "cd $(q "$CLUSTER_GROUP_ROOT") 2>/dev/null; mkdir -p $(q "$CLUSTER_WORK_ROOT")/stage $(q "$CLUSTER_WORK_ROOT")/runs $(q "$CLUSTER_WORK_ROOT")/cache $(q "$CLUSTER_WORK_ROOT")/tmp $(q "$CLUSTER_WORK_ROOT")/mdops-state" \
+      && okl "setup cluster work root $CLUSTER_WORK_ROOT: $(remote cluster usage "$CLUSTER_WORK_ROOT")" || { fail "setup cannot create $CLUSTER_WORK_ROOT"; rc=1; }
+  else fail "setup CLUSTER_WORK_ROOT unset -> set it in $CONF (docs/storage.md)"; rc=1; fi
   out="$STATE/discovery/$(date +%Y%m%d-%H%M%S)-setup"; mkdir -p "$out"
-  rssh rudra "env MD_ROLE=rudra MD_PEER_HOST=$(q "$CLUSTER_HOST") MD_PEER_USER=$(q "$CLUSTER_USER") bash -s" < "$ROOT/remote/probe.sh" > "$out/rudra.txt" 2>&1 && okl "setup rudra scanned ($(wc -l < "$out/rudra.txt" | tr -d ' ') lines)" || { fail "setup rudra scan failed (see $out/rudra.txt)"; rc=1; }
-  ln -sfn "$out" "$STATE/discovery/latest"
+  if [ $rud = 1 ]; then
+    rssh rudra "env MD_ROLE=rudra MD_PEER_HOST=$(q "$CLUSTER_HOST") MD_PEER_USER=$(q "$CLUSTER_USER") bash -s" < "$ROOT/remote/probe.sh" > "$out/rudra.txt" 2>&1 && okl "setup rudra scanned ($(wc -l < "$out/rudra.txt" | tr -d ' ') lines)" || { fail "setup rudra scan failed (see $out/rudra.txt)"; rc=1; }
+    ln -sfn "$out" "$STATE/discovery/latest"
+  fi
   cmd_agent_key init >/dev/null; APPROVED="PI ran mtd setup $(date '+%F %T')"
-  cmd_agent_key authorize --yes >/dev/null 2>&1 && okl "setup agent key authorised (rudra jump-only, cluster no-forwarding)" || { fail "setup agent key"; rc=1; }
-  rssh rudra 'ssh -n -o BatchMode=yes -o ConnectTimeout=8 md-cluster true' >/dev/null 2>&1 && okl "setup rudra->cluster key already works" || { cmd_link_rudra_cluster --yes >/dev/null 2>&1 && okl "setup rudra->cluster key installed" || { fail "setup rudra->cluster key (cluster may refuse keys from rudra)"; rc=1; }; }
+  cmd_agent_key authorize --yes 2>&1 | sed -E -n 's/^(PASS|OK) +/OK setup /p; s/^WARN/WARN setup/p'
+  if [ $rud = 1 ]; then rssh rudra 'ssh -n -o BatchMode=yes -o ConnectTimeout=8 md-cluster true' >/dev/null 2>&1 && okl "setup rudra->cluster key already works" || { cmd_link_rudra_cluster --yes >/dev/null 2>&1 && okl "setup rudra->cluster key installed" || { fail "setup rudra->cluster key (cluster may refuse keys from rudra)"; rc=1; }; }; fi
   ho_fetch >/dev/null 2>&1; case $? in
-    2) if cmd_handoff init >/dev/null 2>&1; then okl "setup handoff created on rudra"; else fail "setup handoff init"; rc=1; fi;;
-    0) okl "setup handoff present";; *) fail "setup handoff unreachable"; rc=1;; esac
-  cmd_env snapshot rudra | head -1
+    2) if cmd_handoff init >/dev/null 2>&1; then okl "setup handoff created on hub $(hub)"; else fail "setup handoff init"; rc=1; fi;;
+    0) okl "setup handoff present on hub $(hub)";; *) fail "setup handoff unreachable on hub $(hub)"; rc=1;; esac
+  [ $rud = 1 ] && cmd_env snapshot rudra | head -1
+  [ -n "$CLUSTER_WORK_ROOT" ] && cmd_env snapshot cluster 2>&1 | grep -E '^(OK|FAIL|NOTE)' | head -2
+  sync_cluster || true
   if [ "$(uname)" = Darwin ]; then cmd_awake on; cmd_keepalive install | sed 's/^PASS/OK/'; fi
-  if [ "$BACKUP_STANDING_APPROVAL" != yes ]; then printf 'Backups to GitHub + rudra are OFF. Allow agents to back up code and documents (never data) automatically? [y/N] '; read -r ans </dev/tty
+  if [ "$BACKUP_STANDING_APPROVAL" != yes ]; then printf 'Backups to GitHub (+ rudra when up) are OFF. Allow agents to back up code and documents (never data) automatically? [y/N] '; read -r ans </dev/tty
     case "$ans" in y|Y|yes) sed -i.bak 's/^BACKUP_STANDING_APPROVAL=.*/BACKUP_STANDING_APPROVAL=yes/' "$CONF" && rm -f "$CONF.bak" && cmd_journal "PI set BACKUP_STANDING_APPROVAL=yes (mtd setup)" >/dev/null && okl "setup backups on";; *) okl "setup backups stay off (agents ask before each push)";; esac; fi
   cmd_check || rc=1; return $rc; }
 
@@ -834,6 +869,7 @@ cmd_hub() { # status | use cluster|rudra : where coordination state lives; the p
     status) local h; h=$(hub); route "$h" >/dev/null && okl "hub $h reachable (state $(hub_state_for "$h"))" || fail "hub $h unreachable -> mtd hub use $([ "$h" = rudra ] && echo cluster || echo rudra)";;
     use) local to=$2 from; from=$(hub); case "$to" in cluster|rudra) ;; *) die "mtd hub use cluster|rudra";; esac
       [ "$to" = "$from" ] && { okl "hub already $to"; return 0; }
+      [ "$to" = cluster ] && need_conf CLUSTER_WORK_ROOT
       route "$to" >/dev/null || die "$to is unreachable too: mtd doctor"
       local fsp tsp; fsp=$(hub_state_for "$from"); tsp=$(hub_state_for "$to")
       if route "$from" >/dev/null; then
@@ -928,8 +964,9 @@ RUDRA_DATA_ROOT=                # canonical MatterDoor data + harvested runs on 
 RUDRA_ARCHIVE_ROOT=             # where mdops archive writes .tar.zst
 CLUSTER_WORK_ROOT=              # the ONLY cluster area mdops writes to (stage/, runs/)
 CLUSTER_GROUP_ROOT=             # shared group dir: read-mostly, never pruned by mdops
-CLUSTER_QUOTA_WARN_PCT=80
-CLUSTER_QUOTA_STOP_PCT=90
+CLUSTER_QUOTA_WARN_PCT=95       # warn above this % used
+CLUSTER_QUOTA_STOP_PCT=100      # refuse above this % (100 = off: on a shared volume the free-GB floor is the real gate)
+CLUSTER_MIN_FREE_GB=40          # refuse cluster writes when less than this is free
 
 # ---- slurm defaults (from discovery)
 SLURM_PARTITION=                # GPU partition

@@ -26,6 +26,26 @@ Start with `mdops doctor`. It names the failing layer.
    - `mtd harvest ID --to mac`.
 3. When rudra is back, run `mtd hub use rudra`. The state is copied back.
 
+## Cluster too full to write
+`stage`, `run cluster` and `submit` refuse when the work root has less than
+`CLUSTER_MIN_FREE_GB` free.
+1. Run `mtd harvest ID --yes` for finished runs, then `mtd prune --yes` (with
+   approval).
+2. If that is not enough, run `mtd census` (a CPU job; read its output with
+   `mtd status ID`).
+3. Write a deletion and archive plan, and ask the PI.
+
+Never lower the floor to get a job through.
+
+## GPU submit refused
+- `job … is 'proposed'`: the PI must approve it in `jobs.yaml`.
+- `no job script`: commit and push the script, then `mtd sync cluster`.
+- `not fast-forwarded`: the cluster checkout is dirty or on another branch.
+  Ask the PI, and never reset it.
+- `guard refused`: read the guard's own message. It wants typed GRES, one
+  node, one task and the guard lines; copy the header from
+  `cluster/md_gpu_smoke_3090.sh`.
+
 ## Recovering a broken state
 - **Stale connections.** Remove `~/.ssh/cm/*` and `state/route.*`, then run
   `mdops doctor`.
