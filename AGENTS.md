@@ -52,6 +52,16 @@ Routes are picked automatically, in this order:
 - cluster: through rudra (`md-cluster`), then other fallbacks (`md-cluster-lan`, `md-cluster-direct`).
 
 ## 2. Hard safety rules (no exceptions without the human saying so in chat)
+- **Never disrupt other agents or take over the computer.**
+  - No screen, keyboard, mouse or clipboard control.
+  - Never open, close or focus the human's apps.
+  - Never kill, attach to or signal processes, tmux sessions or jobs you did
+    not start. `mdops cancel` only cancels runs recorded under your `MD_AGENT`.
+  - Never release or steal another agent's lock.
+  - Never change network state (Tailscale, VPN) or system settings.
+  - Work only through `mdops`/`mtd`, on resources you started or have locked.
+    Cleanup and archiving take the `rudra-cleanup` lock and wait while runs
+    are active.
 - **Never type or store passwords, OTPs or tokens.** If `doctor` says a host
   needs a login, stop and ask the human to run `mdops login <host>`.
 - **Login node:** agents may run only the commands that `mdops ssh cluster`
@@ -132,7 +142,7 @@ mdops journal "msg" | --tail N
 mdops run rudra --name N --dir REPO [--allow-dirty] [--no-gpu] -- CMD...      tmux + GPU queue on rudra
 mdops run cluster --name N --dir REPO --no-gpu [--time --mem --cpus] -- CMD   CPU Slurm job
 mdops submit cluster/JOB.sh [--check]                                        GPU job via the project guard
-mdops runs [rudra|cluster] | mdops status RUN_ID
+mdops runs [rudra|cluster] | mdops status RUN_ID | mdops cancel RUN_ID (own runs only)
 mdops quota | mdops census           storage usage (census = du inside a Slurm CPU job)
 mdops stage RUDRA_PATH [--name N] [--yes]       rudra -> cluster work/stage (resumable, retried)
 mdops harvest RUN_ID [--yes]                    cluster run -> rudra, verified, then prunable

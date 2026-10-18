@@ -85,7 +85,7 @@ remote() { # HOST SUBCMD ARGS...  — stream remote/mdops-remote.sh, run it ther
 remote_ro() { local h=$1; shift; rssh_ro "$h" "env $(remote_state "$h") bash -s -- $(q "$@")" < "$REMOTE"; }
 
 # ---------- login-node guard: agents may only run these on the cluster login node ----------
-LOGIN_OK=" squeue sacct sinfo sprio sshare scontrol scancel ls cat head tail stat readlink realpath df quota lfs git cd pwd echo printf hostname whoami id date wc test true mkdir basename dirname "
+LOGIN_OK=" squeue sacct sinfo sprio sshare scontrol ls cat head tail stat readlink realpath df quota lfs git cd pwd echo printf hostname whoami id date wc test true mkdir basename dirname "
 login_guard() { # CMDSTRING -> 0 if allowed
   local seg w rest t
   t=${1//&&/}; t=${t//2>\/dev\/null/}; t=${t//>\/dev\/null/}
@@ -205,6 +205,11 @@ cmd_run() { # rudra|cluster --name N --dir D [opts] -- CMD...
     *) die "run rudra|cluster" ;;
   esac; }
 
+cmd_cancel() { # RUN_ID — only runs started under your MD_AGENT (humans: --human)
+  local id=$1 h=rudra; [ -n "$id" ] || die "mdops cancel RUN_ID"; case "$id" in *-cluster-*) h=cluster;; esac
+  [ "$2" = --human ] && { [ "$AGENT" = human ] && [ -t 0 ] || die "--human is for a person at a terminal"; }
+  remote "$h" cancel "$id" "$AGENT" ${2:+"$2"}; }
+
 cmd_runs() { local h; for h in ${1:-rudra cluster}; do say "== $h"; remote "$h" runs "${2:-15}" || warn "$h unreachable"; done; }
 cmd_status() { local id=$1; [ -n "$id" ] || die "mdops status RUN_ID"; case "$id" in *-cluster-*) remote cluster run-status "$id";; *) remote rudra run-status "$id";; esac; }
 
@@ -272,6 +277,11 @@ cmd_clean() { # scan | caches [--yes]  (rudra only; anything not a cache goes th
     scan) rssh rudra "env MD_ROLE=rudra bash -s" < "$ROOT/remote/probe.sh" | sed -n '/===== home top-level/,/===== gpu/p' ;;
     caches)
       local n=1; [ "$2" = --yes ] && n=0
+      if [ $n = 0 ]; then
+        [ "$(remote rudra busy)" = 0 ] || die "runs are active on rudra (mdops runs rudra); cache cleanup waits so it cannot disrupt them"
+        remote rudra lock acquire rudra-cleanup "$AGENT" 60 >/dev/null || die "another agent holds rudra-cleanup"
+        trap 'remote rudra lock release rudra-cleanup "$AGENT" >/dev/null' EXIT
+      fi
       rssh rudra "n=$n; for d in ~/.cache/pip ~/.local/share/Trash/files ~/.local/share/Trash/info ~/.cache/thumbnails ~/.npm/_cacache; do
           [ -d \"\$d\" ] || continue; printf '%s\t%s\n' \"\$(du -sh \"\$d\" | cut -f1)\" \"\$d\"; [ \$n = 0 ] && rm -rf -- \"\$d\"/* \"\$d\"/.[!.]* 2>/dev/null
         done
@@ -286,6 +296,8 @@ cmd_archive() { # RUDRA_PATH [--yes]: tar+zstd into RUDRA_ARCHIVE_ROOT, verify, 
   local src=$1 yes=0 rm=0; shift; while [ $# -gt 0 ]; do case "$1" in --yes) yes=1;; --remove-original) rm=1;; esac; shift; done
   need_conf RUDRA_ARCHIVE_ROOT; [ -n "$src" ] || die "mdops archive RUDRA_PATH [--yes] [--remove-original]"
   [ $yes = 1 ] || { rssh rudra "du -sh $(q "$src"); df -h $(q "$RUDRA_ARCHIVE_ROOT") | tail -1"; say "(dry run — add --yes to archive; originals are kept unless --remove-original AND verification passes)"; return; }
+  remote rudra lock acquire rudra-cleanup "$AGENT" 240 >/dev/null || die "another agent holds rudra-cleanup"
+  trap 'remote rudra lock release rudra-cleanup "$AGENT" >/dev/null' EXIT
   rssh rudra "set -e; src=\$(readlink -f $(q "$src")); name=\$(basename \"\$src\")-\$(date +%Y%m%d); dst=$(q "$RUDRA_ARCHIVE_ROOT")/\$name.tar.zst
     mkdir -p $(q "$RUDRA_ARCHIVE_ROOT"); cd \"\$(dirname \"\$src\")\"
     tar -cf - \"\$(basename \"\$src\")\" | zstd -T0 -10 -q -o \"\$dst\"
@@ -625,7 +637,7 @@ case "$c" in
   net) cmd_net "$@" ;;  login) cmd_login "$@" ;;  route) cmd_route "$@" ;;
   ssh) cmd_ssh "$@" ;;  open) cmd_open "$@" ;;  tunnel) cmd_tunnel "$@" ;;
   lock) cmd_lock "$@" ;;  journal) cmd_journal "$@" ;;
-  run) cmd_run "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
+  run) cmd_run "$@" ;;  cancel) cmd_cancel "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
   profile) cmd_profile "$@" ;;  brief) cmd_brief "$@" ;;  handoff) cmd_handoff "$@" ;;  agent) cmd_agent "$@" ;;
   agent-key) cmd_agent_key "$@" ;;
   submit) cmd_submit "$@" ;;  census) cmd_census "$@" ;;  keepalive) cmd_keepalive "$@" ;;

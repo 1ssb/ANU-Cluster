@@ -186,6 +186,18 @@ prune() { # WORK_ROOT YES(0/1)
 }
 
 
+# ---------- cancel: only your own runs (never another agent's work) ----------
+cancel_run() { # RUN_ID AGENT [--human]
+  local rd="$STATE/runs/$1" owner job
+  [ -d "$rd" ] || die "unknown run $1 on $(hostname -s)"
+  owner=$(sed -n 's/^agent=//p' "$rd/meta.env")
+  [ "$owner" = "$2" ] || [ "${3:-}" = --human ] || die "run $1 belongs to '$owner', not '$2' — agents never cancel another agent's work"
+  job=$(sed -n 's/^job=//p' "$rd/meta.env")
+  if [ -n "$job" ]; then scancel "$job" && echo "cancelled slurm job $job ($1)"; fi
+  tmux has-session -t "md-$1" 2>/dev/null && tmux kill-session -t "md-$1" && echo "stopped tmux md-$1"
+  echo "cancelled_by=$2 at $(now)" >> "$rd/meta.env"; journal "$2" "cancelled own run $1" >/dev/null; }
+busy_runs() { tmux ls 2>/dev/null | grep -c '^md-' ; }
+
 # ---------- living handoff (git-versioned on this host) ----------
 HO="$STATE/handoff"
 handoff_init_repo() { mkdir -p "$HO"; [ -d "$HO/.git" ] || { git -C "$HO" init -q && git -C "$HO" config user.name mdops && git -C "$HO" config user.email mdops@localhost; }; }
@@ -223,6 +235,8 @@ case "$sub" in
   handoff-get) handoff_get ;;
   handoff-put) handoff_put "$@" ;;
   handoff-log) handoff_log "$@" ;;
+  cancel)   cancel_run "$@" ;;
+  busy)     busy_runs ;;
   ping)     echo "pong $(hostname -s) $(now)" ;;
   *) die "unknown subcommand '$sub'" ;;
 esac
