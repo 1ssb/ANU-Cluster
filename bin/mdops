@@ -215,7 +215,7 @@ cmd_lock() {
 cmd_journal() {
   if [ "$1" = --tail ]; then remote "$(hub)" journal-tail "${2:-30}"; return; fi
   [ -n "$*" ] || die 'mdops journal "what you did / what is running"'
-  remote "$(hub)" journal "$AGENT" "$*" 2>/dev/null || { printf -- '- %s [%s@mac OFFLINE] %s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/journal-offline.md"; warn "rudra unreachable — saved to state/journal-offline.md"; }; }
+  { route "$(hub)" >/dev/null && remote "$(hub)" journal "$AGENT" "$*" 2>/dev/null; } || { printf -- '- %s [%s@mac OFFLINE] %s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/journal-offline.md"; warn "hub $(hub) unreachable — saved to state/journal-offline.md (merged on the next: mtd hub use ...)"; }; }
 
 cmd_run() { # rudra|cluster --name N --dir D [opts] -- CMD...
   local h=$1; shift; local name= dir= allow=0 gpu=1 gpus=1 time=04:00:00 mem=32G cpus=8 part=$SLURM_PARTITION job=

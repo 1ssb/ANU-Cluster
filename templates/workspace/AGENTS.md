@@ -109,7 +109,34 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
 - **Record usage.** At finish, journal the host, wall time and GPU count, and
   the result location.
 
-## 5. Connections
+## 5. With or without rudra (the project must work either way)
+- **Normal mode** (`hub=rudra`): rudra holds the coordination state (locks,
+  journal, handoff, asks), does downloads and single-GPU runs, and keeps the
+  canonical data and backups.
+- **Cluster-only mode** (`hub=cluster`): when rudra is unreachable for more
+  than a short blip, run `mtd hub use cluster`.
+  - Coordination moves to the cluster work root. The state is copied if rudra
+    is still reachable; otherwise it is seeded from the project repo's handoff
+    mirror.
+  - **Downloads:** on this Mac, then `mtd stage PATH --from mac --yes …`. The
+    cluster login node never downloads, and compute nodes run offline.
+  - **GPU:** `mtd submit cluster/JOB.sh --job …` with typed GRES.
+  - **CPU:** `mtd run cluster --no-gpu …`.
+  - **Results:** `mtd harvest ID --to mac` (this is the default whenever rudra
+    is offline). Results are verified by file count and bytes.
+  - **Backups:** GitHub only.
+  - When rudra returns: `mtd hub use rudra`.
+- **The cluster is nearly full** (the group volume is at 99%).
+  - Every cluster write refuses when free space drops below
+    `CLUSTER_MIN_FREE_GB` (40 GB by default).
+  - Keep outputs small and harvest promptly. Never leave large intermediates
+    on the cluster.
+  - Freeing space: `mtd census`, then a deletion plan the PI approves.
+- Plan every job so it can run on **either** rudra or the cluster. Declare the
+  host in `jobs.yaml`, but keep the script host-agnostic: use paths from
+  `$MD_OUT_DIR` / `$MD_WORK`, never hard-coded machine paths.
+
+## 6. Connections
 - **Routes are automatic.** Mac → Tailscale → rudra → cluster, with fallbacks.
   A keepalive reopens dropped connections within 60 s.
 - **If something fails:**
@@ -121,7 +148,7 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
 - **Logins are the PI's.** If a host needs a password or OTP, ask the PI to
   run `mtd login <host>`.
 
-## 6. Spend tokens on reasoning, not output
+## 7. Spend tokens on reasoning, not output
 - **Use the levers.** They print one line (`OK …` / `FAIL … -> fix`) and
   verify themselves: `mtd check | sync | save | push | backup | build paper |
   status | env snapshot | ledger verify | ask | handoff`. The full table is
@@ -132,7 +159,7 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
 - **Keep notes short and structured:** tables and bullets with sources.
   Prefer updating a document in place over appending.
 
-## 7. End of every session (mandatory)
+## 8. End of every session (mandatory)
 1. Leave runs in a clean state: running (and journaled), finished and
    harvested, or cancelled.
 2. Commit your work with `mtd save`. Update `STATUS.md` and the registry if
@@ -146,7 +173,7 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
 4. Run `mtd backup`. For GitHub, use standing approval or ask the PI.
 5. Release your locks.
 
-## 8. Integrity, non-negotiable
+## 9. Integrity, non-negotiable
 - No invented numbers, citations or results.
   - Cite files, commits and URLs.
   - Mark anything unverified.

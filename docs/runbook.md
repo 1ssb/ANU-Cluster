@@ -16,6 +16,16 @@ Start with `mdops doctor`. It names the failing layer.
 | run refused: uncommitted changes | reproducibility gate | commit and push first. `--allow-dirty` only for throwaway debugging (the diff is saved). |
 | ssh says host key changed for md-rudra / md-cluster | rudra reinstalled, or a route now hits a different machine | stop. Verify with the human before removing the old key (`ssh-keygen -R md-rudra`). |
 
+## Rudra down for more than a blip
+1. Run `mtd hub use cluster`. Locks, journal, handoff and asks move to the
+   cluster work root. Nothing is lost: the handoff is also mirrored in the
+   project repo.
+2. Work continues as follows:
+   - downloads on the Mac, then `mtd stage PATH --from mac --yes`;
+   - jobs via `mtd submit` / `mtd run cluster`;
+   - `mtd harvest ID --to mac`.
+3. When rudra is back, run `mtd hub use rudra`. The state is copied back.
+
 ## Recovering a broken state
 - **Stale connections.** Remove `~/.ssh/cm/*` and `state/route.*`, then run
   `mdops doctor`.

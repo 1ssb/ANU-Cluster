@@ -13,6 +13,15 @@ moves between them. Nothing irreplaceable lives only on the cluster work root.
 | cluster node scratch | `/raid/$USER/...` on compute nodes | per-job temp | job-scoped, per the project contract |
 | Mac | the paper repo + small results | figures, tables, LaTeX | git |
 
+## Limits and modes
+- **Cluster writes.** Cluster writes refuse when the work root has less than
+  `CLUSTER_MIN_FREE_GB` free (default 40) or is above `CLUSTER_QUOTA_STOP_PCT`
+  used (default 99). The percentage alone is meaningless on a shared 4.5 TB
+  volume that is already at 99%.
+- **Without rudra.** The canonical copy of small results is this Mac
+  (`~/MatterDoor/data/runs/<id>`, never in git). Large data stays in the
+  cluster group storage, recorded in the project registry.
+
 ## How the numbers get filled in
 1. `mdops discover` maps every symlink in `matterdoor` / `rudra-work` / `rudra-shared` and the rudra disks. On the cluster it uses only depth-1 listings, never scans.
 2. `mdops census` measures cluster sizes inside a Slurm CPU job.

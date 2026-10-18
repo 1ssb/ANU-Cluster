@@ -93,7 +93,10 @@ Routes are picked automatically, in this order:
 - **Everything that moves or deletes data is a dry run by default.** Read the
   dry-run output, then repeat with `--yes`.
 - **Storage limits:** `stage` and `run cluster` refuse once the cluster work
-  root is above `CLUSTER_QUOTA_STOP_PCT`. Harvest and prune first.
+  root has less than `CLUSTER_MIN_FREE_GB` free (default 40) or is above
+  `CLUSTER_QUOTA_STOP_PCT` (default 99). Harvest and prune first.
+- **Without rudra:** `mtd hub use cluster` moves coordination to the cluster.
+  Stage from the Mac (`--from mac`) and harvest to the Mac (`--to mac`).
 - **Reproducibility:** `mdops run` refuses a repo with uncommitted changes.
   `--allow-dirty` saves the diff with the run. Every result in the paper must
   trace to a run id (`MD_RUN_ID`) and its commit.
@@ -144,6 +147,8 @@ mtd save REPO "msg" [paths]          local commit (guards run in hooks); verifie
 mtd push REPO|all --approved "..."   upload to GitHub; verified against ls-remote
 mtd backup [install|status]          mirror all repos + uncommitted work to rudra (+GitHub with standing approval)
 mtd build paper | env snapshot rudra|cluster | ledger verify | ask "what — why"
+mtd hub [status] | mtd hub use cluster|rudra   where locks/journal/handoff/asks live (cluster-only mode when rudra is down)
+mtd stage PATH --from mac|rudra [--yes]        mtd harvest ID --to rudra|mac [--yes]   (mac = without rudra)
 mdops agent-key init|authorize --yes|use|revoke --yes   restricted key for sandboxed agents
 mdops doctor                         health of routes, keepalive, rudra, cluster storage, locks
 mdops net status|up|ping|netcheck    Tailscale on this Mac (+ GlobalProtect presence); 'down --yes' is human-only
