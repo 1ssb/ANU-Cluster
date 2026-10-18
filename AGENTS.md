@@ -64,6 +64,9 @@ Routes are picked automatically, in this order:
   Ask in chat and wait for an explicit yes, then repeat the command with
   `--approved "<their words + time>"`. The approval is written to the journal.
   `mdops` refuses these actions without it.
+- **An approval covers one execution.** Never repeat an approved action on an
+  old yes. Jobs declared `once: true` run a single time, and `mdops` refuses
+  a repeat.
 - **Never disrupt other agents.**
   - Never kill, attach to or signal processes, tmux sessions or jobs you did
     not start. `mdops cancel` only cancels runs recorded under your `MD_AGENT`.

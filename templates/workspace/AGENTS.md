@@ -55,6 +55,11 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
 | launch declared CPU jobs and approved GPU jobs; `mtd hub use cluster` when rudra is down | anything irreversible you are unsure about | stop, kill or steal another agent's runs, locks or files; take over the PI's screen |
 | **ask for what you cannot access**: `mtd ask "<what> — <why>"`, then ask in chat and move to other work | | type or store passwords, OTPs or tokens |
 
+**An approval covers one execution.** Do not repeat an approved action on the
+strength of an earlier yes. Jobs marked `once: true` in `jobs.yaml` run a
+single time: the portal refuses a second run. If that run fails, report it
+and ask again (`dec:2026-10-18-approvals-once`).
+
 ## 3. Working cadence: balance progress, compute and record-keeping
 - **Commit** (`mtd save REPO "msg" [paths]`, local only) when a unit of work
   is finished and documented: a fix together with its doc update, a new

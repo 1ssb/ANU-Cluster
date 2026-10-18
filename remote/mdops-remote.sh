@@ -188,6 +188,11 @@ run_submit() { # NAME PROJECT_DIR SCRIPT GUARD ALLOW_DIRTY AGENT WORK "PCT:MINFR
   echo "RUN $id"; echo "job: $jid"; echo "out: $out"; echo "log: $log"; echo "storage now: $u"
 }
 
+job_count() { # JOB_SPEC -> "N LAST_RUN_ID": runs of a declared job that were actually queued/started here
+  local n=0 last=- f; for f in "$STATE"/runs/*/meta.env; do [ -f "$f" ] || continue
+    grep -qxF "job_spec=$1" "$f" || continue; grep -qxF "submit=failed" "$f" && continue
+    n=$((n+1)); last=$(sed -n 's/^run_id=//p' "$f"); done; echo "$n $last"; }
+
 runs() { tail -n "${1:-20}" "$INDEX" | column -t -s $'\t' 2>/dev/null || tail -n "${1:-20}" "$INDEX"; }
 
 run_status() { # RUN_ID
@@ -286,6 +291,7 @@ case "$sub" in
   run-local) run_local "$@" ;;
   run-slurm) run_slurm "$@" ;;
   run-submit) run_submit "$@" ;;
+  job-count) job_count "$@" ;;
   storage-gate) storage_gate "$@" ;;
   runs)     runs "$@" ;;
   run-status) run_status "$@" ;;

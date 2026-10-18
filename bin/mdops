@@ -109,6 +109,13 @@ job_gate() { # JOB KIND -> agents may only launch jobs declared in control/regis
   [ "$st" = retired ] && die "job $job is retired"
   [ "$kind" = gpu ] && [ "$jk" != gpu ] && die "job $job is declared kind=$jk; this launch uses a GPU (add --no-gpu or declare a gpu job)"
   [ "$jk" = gpu ] && [ "$st" != approved ] && die "GPU job $job is '$st': the PI must approve it (status: approved) before it runs"
+  once_gate "$job" "$jf"; }
+once_gate() { # JOB JOBS_FILE: a job declared 'once: true' runs a single time (PI approvals are one-time, dec:2026-10-18-approvals-once)
+  local job=$1 jf=$2 once jh c; once=$(awk -v id="$job" '/^- id:/{f=($3==id)} f&&/^  once:/{print $2; exit}' "$jf")
+  [ "$once" = true ] || return 0
+  jh=$(awk -v id="$job" '/^- id:/{f=($3==id)} f&&/^  host:/{print $2; exit}' "$jf")
+  c=$(remote_ro "${jh:-cluster}" job-count "$job" 2>/dev/null) || die "cannot confirm that one-time job $job has not already run ($jh unreachable): try again when it is reachable"
+  [ "${c%% *}" = 0 ] || die "job $job is one-time and already ran as ${c#* } (PI: approvals are not repeated). Report that run's result (mtd status ${c#* }); a repeat needs a new PI approval"
   return 0; }
 remote_ro() { local h=$1; shift; rssh_ro "$h" "env $(remote_state "$h") bash -s -- $(q "$@")" < "$REMOTE"; }
 
