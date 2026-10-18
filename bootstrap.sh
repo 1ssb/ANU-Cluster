@@ -50,7 +50,7 @@ cp "$PORTAL/templates/workspace/data.README.md" "$WS/data/README.md"
 say "+ workspace AGENTS.md / README.md / CLAUDE.md written"
 
 # 5. portal install (ssh Include, ~/bin/mtd, discovery, agent key, handoff, keepalive)
-"$PORTAL/install.sh" "$@"
+"$PORTAL/install.sh" "$@" </dev/null   # prompts read /dev/tty; closed stdin stops ssh swallowing typed-ahead answers
 MDOPS="$PORTAL/bin/mdops"; CONF="$PORTAL/config/hosts.conf"
 if [ -f "$CONF" ]; then
   grep -q '^WORKSPACE=' "$CONF" || printf '\n# workspace (bootstrap)\nWORKSPACE=%q\n' "$WS" >> "$CONF"

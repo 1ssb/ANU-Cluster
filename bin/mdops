@@ -62,7 +62,7 @@ candidates() { case "$1" in
 
 alive() { # ALIAS -> 0 if usable without any prompt
   ssh -O check "$1" >/dev/null 2>&1 && return 0
-  to 25 ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" true >/dev/null 2>&1; }
+  to 25 ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$1" true >/dev/null 2>&1; }
 
 route() { # HOST -> prints working alias (cached 5 min), or fails
   local h=$1 cache="$STATE/route.$1" a t
@@ -425,7 +425,7 @@ cmd_keepalive() { # install | uninstall | status | tick  — macOS launchd agent
     tick)
       for a in md-rudra md-cluster; do
         ssh -O check "$a" >/dev/null 2>&1 && continue
-        if to 40 ssh -o BatchMode=yes -o ConnectTimeout=12 -fN "$a" >/dev/null 2>&1; then echo "$(date '+%F %T') reopened $a" >> "$log"
+        if to 40 ssh -n -o BatchMode=yes -o ConnectTimeout=12 -fN "$a" >/dev/null 2>&1; then echo "$(date '+%F %T') reopened $a" >> "$log"
         else echo "$(date '+%F %T') $a down (no route or needs a human login)" >> "$log"; fi
       done
       [ -f "$log" ] && [ "$(wc -l < "$log")" -gt 2000 ] && tail -n 500 "$log" > "$log.tmp" && mv "$log.tmp" "$log" ;;
