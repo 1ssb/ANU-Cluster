@@ -80,7 +80,7 @@ run_local() { # NAME DIR ALLOW_DIRTY GPU AGENT OUT_ROOT -- CMD...
   mkdir -p "$out" || die "cannot create $out"
   printf '%q ' "$@" > "$rd/cmd.txt"
   { echo "run_id=$id"; echo "host=$(hostname -s)"; echo "dir=$dir"; echo "commit=$COMMIT"; echo "dirty=$DIRTY"
-    echo "agent=$agent"; echo "gpu_lock=$gpu"; echo "out_dir=$out"; echo "started=$(now)"; } > "$rd/meta.env"
+    echo "agent=$agent"; echo "job_spec=${MD_JOB:-}"; echo "gpu_lock=$gpu"; echo "out_dir=$out"; echo "started=$(now)"; } > "$rd/meta.env"
   cat > "$rd/launch.sh" <<EOF
 #!/usr/bin/env bash
 cd $(printf %q "$dir") || exit 97
@@ -147,7 +147,7 @@ run_slurm() { # NAME DIR ALLOW_DIRTY AGENT WORK_ROOT STOP_PCT SBATCH_ARGS... -- 
     echo 'rc=$?; echo $rc > "$MD_OUT_DIR/exit_code"; echo "[mdops] $(date -Is) exit $rc"; exit $rc'
   } > "$rd/job.sbatch"
   cp "$rd/job.sbatch" "$out/job.sbatch"
-  { echo "run_id=$id"; echo "host=cluster"; echo "dir=$dir"; echo "commit=$COMMIT"; echo "dirty=$DIRTY"; echo "agent=$agent"
+  { echo "run_id=$id"; echo "host=cluster"; echo "dir=$dir"; echo "commit=$COMMIT"; echo "dirty=$DIRTY"; echo "agent=$agent"; echo "job_spec=${MD_JOB:-}"
     echo "out_dir=$out"; echo "submitted=$(now)"; } > "$rd/meta.env"
   cp "$rd/meta.env" "$out/meta.env"; [ -f "$rd/dirty.patch" ] && cp "$rd/dirty.patch" "$out/"
   local jid; jid=$(sbatch --parsable "$rd/job.sbatch") || die "sbatch failed"
@@ -198,6 +198,31 @@ cancel_run() { # RUN_ID AGENT [--human]
   echo "cancelled_by=$2 at $(now)" >> "$rd/meta.env"; journal "$2" "cancelled own run $1" >/dev/null; }
 busy_runs() { tmux ls 2>/dev/null | grep -c '^md-' ; }
 
+# ---------- access requests: things an agent cannot reach; shown in every briefing ----------
+REQ="$STATE/requests.tsv"
+ask_add() { local agent=$1; shift; [ -f "$REQ" ] || printf 'n\tstatus\topened\tagent\trequest\tresolution\n' > "$REQ"
+  local n=$(( $(wc -l < "$REQ") )); printf '%s\topen\t%s\t%s\t%s\t\n' "$n" "$(now)" "$agent" "$*" >> "$REQ"
+  journal "$agent" "ASK #$n: $*" >/dev/null; echo "ASK #$n recorded"; }
+ask_list() { [ -f "$REQ" ] || { echo "(no requests)"; return; }
+  awk -F'\t' -v all="${1:-}" 'NR>1 && (all=="--all" || $2=="open"){printf "#%s %s [%s] %s%s\n",$1,$2,$4,$5,($6!=""?" -> "$6:"")}' "$REQ"; }
+ask_close() { local n=$1; shift; [ -f "$REQ" ] || die "no requests"
+  awk -F'\t' -v OFS='\t' -v n="$n" -v r="$*" 'NR>1 && $1==n{$2="closed";$6=r} {print}' "$REQ" > "$REQ.tmp" && mv "$REQ.tmp" "$REQ"; echo "ASK #$n closed"; }
+
+# ---------- environment snapshot: tar of specs on stdout ----------
+env_snapshot() { local d; d=$(mktemp -d); local c=""
+  for x in conda "$HOME/miniconda3/bin/conda" "$HOME/anaconda3/bin/conda" "$HOME/miniforge3/bin/conda" "$HOME/mambaforge/bin/conda"; do command -v "$x" >/dev/null 2>&1 && { c=$x; break; }; done
+  { echo "host=$(hostname -s) date=$(now)"; uname -a; grep PRETTY_NAME /etc/os-release; command -v nvidia-smi >/dev/null && nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+    command -v nvcc >/dev/null && nvcc --version | tail -1; python3 --version 2>&1; echo "conda=$c"; } > "$d/system.txt" 2>&1
+  if [ -n "$c" ]; then
+    "$c" env list 2>/dev/null | awk '!/^#/ && NF {print $1}' | while read -r e; do
+      "$c" env export -n "$e" --no-builds > "$d/$e.yml" 2>/dev/null
+      "$c" list -n "$e" --explicit > "$d/$e.explicit.txt" 2>/dev/null
+      "$c" run -n "$e" python -m pip freeze > "$d/$e.pip.txt" 2>/dev/null || rm -f "$d/$e.pip.txt"
+    done
+  fi
+  for v in ${MD_VENVS:-}; do [ -x "$v/bin/python" ] && "$v/bin/python" -m pip freeze > "$d/venv-$(basename "$(dirname "$v")")-$(basename "$v").pip.txt"; done
+  tar -C "$d" -cf - . ; rm -rf "$d"; }
+
 # ---------- living handoff (git-versioned on this host) ----------
 HO="$STATE/handoff"
 handoff_init_repo() { mkdir -p "$HO"; [ -d "$HO/.git" ] || { git -C "$HO" init -q && git -C "$HO" config user.name mdops && git -C "$HO" config user.email mdops@localhost; }; }
@@ -237,6 +262,10 @@ case "$sub" in
   handoff-log) handoff_log "$@" ;;
   cancel)   cancel_run "$@" ;;
   busy)     busy_runs ;;
+  ask-add)  ask_add "$@" ;;
+  ask-list) ask_list "$@" ;;
+  ask-close) ask_close "$@" ;;
+  env-snapshot) env_snapshot ;;
   ping)     echo "pong $(hostname -s) $(now)" ;;
   *) die "unknown subcommand '$sub'" ;;
 esac

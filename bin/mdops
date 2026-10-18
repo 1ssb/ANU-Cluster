@@ -21,7 +21,11 @@ RUDRA_DATA_ROOT=; RUDRA_ARCHIVE_ROOT=; CLUSTER_WORK_ROOT=; CLUSTER_GROUP_ROOT=
 CLUSTER_QUOTA_WARN_PCT=80; CLUSTER_QUOTA_STOP_PCT=90
 SLURM_PARTITION=; SLURM_CPU_PARTITION=; SLURM_ACCOUNT=; SLURM_QOS=; SLURM_GRES=gpu:1
 CLUSTER_PROJECT_ROOT=; CLUSTER_SUBMIT_GUARD=
+WORKSPACE="$HOME/MatterDoor"; WS_REPOS="ANU-Cluster into_the_unknown into_the_unknown_paper"; PROJECT_REPO=into_the_unknown; PAPER_REPO=into_the_unknown_paper
+BACKUP_STANDING_APPROVAL=no   # set to yes ONLY by the PI (bootstrap asks): lets agents push code/docs + mirror to rudra
 [ -f "$CONF" ] && . "$CONF"
+PROJECT_DIR="$WORKSPACE/$PROJECT_REPO"; PAPER_DIR="$WORKSPACE/$PAPER_REPO"; CTRL="$PROJECT_DIR/control"
+VERBOSE=0
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
 [ -t 1 ] || { c_red=; c_grn=; c_yel=; c_dim=; c_off=; }
@@ -30,6 +34,9 @@ ok()   { printf '%sPASS%s %s\n' "$c_grn" "$c_off" "$*"; }
 warn() { printf '%sWARN%s %s\n' "$c_yel" "$c_off" "$*"; }
 bad()  { printf '%sFAIL%s %s\n' "$c_red" "$c_off" "$*"; }
 die()  { printf '%smdops:%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 2; }
+okl()  { printf 'OK %s\n' "$*"; }                       # compact one-line success
+fail() { printf 'FAIL %s\n' "$*"; return 1; }          # compact one-line failure: "<op> <why> -> <fix>"
+repo_dir() { local r; for r in $WS_REPOS; do case "$r" in "$1"*) echo "$WORKSPACE/$r"; return 0;; esac; done; [ -d "$1/.git" ] && { echo "$1"; return 0; }; return 1; }
 need_conf() { local v; for v in "$@"; do eval "[ -n \"\$$v\" ]" || die "config value $v is not set in $CONF (see docs/storage.md; lead agent sets it after reviewing discovery)"; done; }
 
 # portable timeout (macOS has no timeout(1)): perl alarm
@@ -81,7 +88,20 @@ rssh_ro() { # HOST CMD — read-only commands: one automatic re-route + retry on
 remote_state() { [ "$1" = cluster ] && [ -n "$CLUSTER_WORK_ROOT" ] && printf 'MD_STATE=%s' "$(q "$CLUSTER_WORK_ROOT/mdops-state")" || printf 'MD_STATE=$HOME/mdops-state'; }
 
 remote() { # HOST SUBCMD ARGS...  — stream remote/mdops-remote.sh, run it there
-  local h=$1; shift; rssh "$h" "env $(remote_state "$h") bash -s -- $(q "$@")" < "$REMOTE"; }
+  local h=$1; shift; rssh "$h" "env $(remote_state "$h") MD_JOB=$(q "${MD_JOB:-}") bash -s -- $(q "$@")" < "$REMOTE"; }
+
+job_gate() { # JOB KIND -> agents may only launch jobs declared in control/registry/jobs.yaml (GPU ones approved by the PI)
+  local job=$1 kind=$2 jf="$CTRL/registry/jobs.yaml" st jk
+  [ "$AGENT" = human ] && [ -z "$job" ] && return 0
+  [ -f "$jf" ] || { [ "$AGENT" = human ] && return 0; die "no $jf (sync the project repo: mtd sync)"; }
+  [ -n "$job" ] || die "agents must name a declared job: --job job:<id> (control/registry/jobs.yaml; add it as status: proposed first)"
+  st=$(awk -v id="$job" '/^- id:/{f=($3==id)} f&&/^  status:/{print $2; exit}' "$jf")
+  jk=$(awk -v id="$job" '/^- id:/{f=($3==id)} f&&/^  kind:/{print $2; exit}' "$jf")
+  [ -n "$st" ] || die "job $job is not declared in control/registry/jobs.yaml"
+  [ "$st" = retired ] && die "job $job is retired"
+  [ "$kind" = gpu ] && [ "$jk" != gpu ] && die "job $job is declared kind=$jk; this launch uses a GPU (add --no-gpu or declare a gpu job)"
+  [ "$jk" = gpu ] && [ "$st" != approved ] && die "GPU job $job is '$st': the PI must approve it (status: approved) before it runs"
+  return 0; }
 remote_ro() { local h=$1; shift; rssh_ro "$h" "env $(remote_state "$h") bash -s -- $(q "$@")" < "$REMOTE"; }
 
 # ---------- login-node guard: agents may only run these on the cluster login node ----------
@@ -156,18 +176,19 @@ cmd_open() { # interactive: mosh+tmux to rudra when available (survives Wi-Fi ch
   [ "$h" = cluster ] && warn "cluster login node: edit/inspect only — compute goes through Slurm"
   ssh "$a" -t "tmux new-session -A -s $(q "$s") 2>/dev/null || exec \$SHELL -l"; }
 
-cmd_submit() { # SCRIPT (relative to CLUSTER_PROJECT_ROOT): validated + submitted by the project's own guard
-  local s=$1; need_conf CLUSTER_PROJECT_ROOT CLUSTER_SUBMIT_GUARD; [ -n "$s" ] || die "mdops submit cluster/SOME_JOB.sh [--check]"
-  local mode=--submit; [ "$2" = --check ] && mode=--check
+cmd_submit() { # SCRIPT --job ID [--check]: validated + submitted by the project's own guard
+  local s=$1 mode=--submit job=; shift; need_conf CLUSTER_PROJECT_ROOT CLUSTER_SUBMIT_GUARD; [ -n "$s" ] || die "mdops submit cluster/SOME_JOB.sh --job job:<id> [--check]"
+  while [ $# -gt 0 ]; do case "$1" in --check) mode=--check;; --job) job=$2; shift;; esac; shift; done
+  job_gate "$job" gpu || exit 2
   local out; out=$(rssh cluster "cd $(q "$CLUSTER_PROJECT_ROOT") && bash $(q "$CLUSTER_SUBMIT_GUARD") --check $(q "$s") && { [ $mode = --check ] || bash $(q "$CLUSTER_SUBMIT_GUARD") --submit $(q "$s"); }") ; local rc=$?
   printf '%s\n' "$out"
-  [ $rc = 0 ] && [ $mode = --submit ] && cmd_journal "submitted $s via project guard: $(printf '%s' "$out" | grep -o 'Submitted batch job [0-9]*')"
+  [ $rc = 0 ] && [ $mode = --submit ] && cmd_journal "submitted $s ($job) via project guard: $(printf '%s' "$out" | grep -o 'Submitted batch job [0-9]*')"
   return $rc; }
 
 cmd_census() { # sizes of the cluster roots, measured inside a Slurm CPU job (never on the login node)
   need_conf CLUSTER_WORK_ROOT
   local roots=${*:-"$CLUSTER_GROUP_ROOT /home/group/rudra-shared"}
-  SLURM_GRES=; cmd_run cluster --name census --dir "$CLUSTER_WORK_ROOT" --allow-dirty --no-gpu --time 01:00:00 --mem 4G --cpus 2 -- \
+  SLURM_GRES=; cmd_run cluster --job job:census --dir "$CLUSTER_WORK_ROOT" --allow-dirty --no-gpu --time 01:00:00 --mem 4G --cpus 2 -- \
     bash -c "for r in $roots; do echo \"== \$r\"; du -sh --apparent-size \"\$r\"/* \"\$r\"/.[!.]* 2>/dev/null | sort -h | tail -60; done; df -h $roots; quota -s 2>/dev/null"; }
 cmd_tunnel() { # HOST REMOTE_PORT [LOCAL_PORT]
   local h=$1 rp=$2 lp=${3:-$2} a; [ -n "$rp" ] || die "mdops tunnel rudra|cluster REMOTE_PORT [LOCAL_PORT]"
@@ -189,13 +210,17 @@ cmd_journal() {
   remote rudra journal "$AGENT" "$*" 2>/dev/null || { printf -- '- %s [%s@mac OFFLINE] %s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/journal-offline.md"; warn "rudra unreachable — saved to state/journal-offline.md"; }; }
 
 cmd_run() { # rudra|cluster --name N --dir D [opts] -- CMD...
-  local h=$1; shift; local name= dir= allow=0 gpu=1 gpus=1 time=04:00:00 mem=32G cpus=8 part=$SLURM_PARTITION
+  local h=$1; shift; local name= dir= allow=0 gpu=1 gpus=1 time=04:00:00 mem=32G cpus=8 part=$SLURM_PARTITION job=
   while [ $# -gt 0 ] && [ "$1" != -- ]; do case "$1" in
+    --job) job=$2; shift;;
     --name) name=$2; shift;; --dir) dir=$2; shift;; --allow-dirty) allow=1;; --no-gpu) gpu=0; gpus=0;;
     --gpus) gpus=$2; shift;; --time) time=$2; shift;; --mem) mem=$2; shift;; --cpus) cpus=$2; shift;; --partition) part=$2; shift;;
     *) die "unknown option $1";; esac; shift; done
   [ "$1" = -- ] && shift
-  [ -n "$name" ] && [ -n "$dir" ] && [ $# -gt 0 ] || die "mdops run rudra|cluster --name NAME --dir REMOTE_REPO_DIR [--allow-dirty] -- CMD..."
+  [ -n "$name" ] || name=${job#job:}
+  [ -n "$name" ] && [ -n "$dir" ] && [ $# -gt 0 ] || die "mdops run rudra|cluster --job ID --dir REMOTE_REPO_DIR [--allow-dirty] -- CMD..."
+  job_gate "$job" "$([ "$gpu" = 1 ] && echo gpu || echo cpu)" || exit 2
+  export MD_JOB="$job"
   case "$h" in
     rudra) remote rudra run-local "$name" "$dir" "$allow" "$gpu" "$AGENT" "$RUDRA_DATA_ROOT" -- "$@" ;;
     cluster)
@@ -220,7 +245,7 @@ cmd_cancel() { # RUN_ID — only runs started under your MD_AGENT (humans: --hum
   remote "$h" cancel "$id" "$AGENT" ${2:+"$2"}; }
 
 cmd_runs() { local h; for h in ${1:-rudra cluster}; do say "== $h"; remote "$h" runs "${2:-15}" || warn "$h unreachable"; done; }
-cmd_status() { local id=$1; [ -n "$id" ] || die "mdops status RUN_ID"; case "$id" in *-cluster-*) remote cluster run-status "$id";; *) remote rudra run-status "$id";; esac; }
+cmd_status() { local id=$1; [ -n "$id" ] || { cmd_resources; return; }; case "$id" in *-cluster-*) remote cluster run-status "$id";; *) remote rudra run-status "$id";; esac; }
 
 cmd_quota() {
   [ -n "$CLUSTER_WORK_ROOT" ] && { printf 'cluster work  %s: ' "$CLUSTER_WORK_ROOT"; remote cluster usage "$CLUSTER_WORK_ROOT"; }
@@ -481,7 +506,8 @@ cmd_handoff() {
     show) ho_fetch; case $? in 1) warn "rudra unreachable — showing cached handoff";; 2) say "(no handoff yet: mtd handoff init)"; return;; esac
           cat "$HOFF/HANDOFF.md" 2>/dev/null ;;
     init) ho_fetch; [ $? = 2 ] || die "a handoff already exists (or rudra is unreachable)"
-          sed "s/^_Single source/_Created $(date '+%Y-%m-%d %H:%M') by $AGENT. Single source/" "$ROOT/templates/HANDOFF.template.md" > "$HOFF/HANDOFF.md"
+          if [ -f "$CTRL/handoff/HANDOFF.md" ]; then cp "$CTRL/handoff/HANDOFF.md" "$HOFF/HANDOFF.md"   # project seed / mirror
+          else sed "s/^_Single source/_Created $(date '+%Y-%m-%d %H:%M') by $AGENT. Single source/" "$ROOT/templates/HANDOFF.template.md" > "$HOFF/HANDOFF.md"; fi
           echo none > "$HOFF/.base"; ho_put none "initial handoff" "$HOFF/HANDOFF.md" ;;
     pull) remote rudra lock acquire handoff "$AGENT" "${2:-90}" || die "someone else is editing the handoff (see: mdops lock list)"
           ho_fetch; case $? in 0) ;; 2) remote rudra lock release handoff "$AGENT" >/dev/null; die "no handoff yet: mtd handoff init";; *) remote rudra lock release handoff "$AGENT" >/dev/null; die "could not fetch the handoff from rudra";; esac
@@ -492,7 +518,10 @@ cmd_handoff() {
           awk -v line="- $(date '+%Y-%m-%d %H:%M') [$AGENT] $2" '{print} /^## Session log/{getline; print; print line; next}' "$HOFF/HANDOFF.md" > "$HOFF/.new" 2>/dev/null
           grep -qF "[$AGENT] $2" "$HOFF/.new" || { cp "$HOFF/HANDOFF.md" "$HOFF/.new"; printf -- '- %s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M')" "$AGENT" "$2" >> "$HOFF/.new"; }
           ver=$(ho_put "$base" "$2" "$HOFF/.new") || die "push refused (see message above); your edit is still in $HOFF/HANDOFF.md"
-          mv "$HOFF/.new" "$HOFF/HANDOFF.md"; ho_fetch >/dev/null; remote rudra lock release handoff "$AGENT" >/dev/null; ok "$ver" ;;
+          mv "$HOFF/.new" "$HOFF/HANDOFF.md"; ho_fetch >/dev/null; remote rudra lock release handoff "$AGENT" >/dev/null
+          if [ -d "$CTRL/handoff" ]; then cp "$HOFF/HANDOFF.md" "$CTRL/handoff/HANDOFF.md"
+            git -C "$PROJECT_DIR" add control/handoff/HANDOFF.md 2>/dev/null && git -C "$PROJECT_DIR" commit -q --only control/handoff/HANDOFF.md -m "handoff: $2" -m "Agent: $AGENT" >/dev/null 2>&1 || true; fi
+          okl "handoff $ver (mirrored to control/handoff, committed locally)" ;;
     release) remote rudra lock release handoff "$AGENT" ;;
     log) remote_ro rudra handoff-log "${2:-20}" ;;
     *) die "mtd handoff show|pull|push \"summary\"|release|log|init" ;;
@@ -510,6 +539,19 @@ cmd_brief() {
     e=$(epoch_of "${d%%|*}"); [ -n "$e" ] || continue; days=$(( (e - now) / 86400 )); label=${d#*|}
     say "- ${label//_/ }: ${d%%|*}  →  $days days left"
   done
+  local short=0; [ "$1" = --short ] && short=1
+  if [ -f "$CTRL/MISSION.md" ]; then
+    say; say "## M. Mission ($CTRL/MISSION.md)"; [ $short = 1 ] && sed -n '/^## Mission/,/^## Deadlines/p' "$CTRL/MISSION.md" | sed '$d' || cat "$CTRL/MISSION.md"
+    say; say "## G. Goals (control/registry/goals.yaml)"
+    awk '/^- id:/{id=$3} /^  title:/{sub(/^  title: /,""); t=$0} /^  status:/{st=$2} /^  due:/{printf "- %-26s %-11s due %s  %s\n", id, st, $2, t}' "$CTRL/registry/goals.yaml"
+    say; say "## S. Research status (control/STATUS.md)"; [ $short = 1 ] && sed -n '/^## Red flags/,/^## Reviewer gaps/p' "$CTRL/STATUS.md" | sed '$d' || cat "$CTRL/STATUS.md"
+    say; say "## K. Knowledge graph"; python3 "$CTRL/tools/kg_check.py" 2>&1 | head -6
+  else say; say "## M. (no control plane found at $CTRL — run: mtd sync, or check WORKSPACE in $CONF)"; fi
+  say; say "## A. Open asks (things agents could not access)"; remote_ro rudra ask-list 2>/dev/null | sed 's/^/    /' || say "    (rudra unreachable)"
+  if [ $short = 1 ]; then
+    say; say "## H. Handoff: next steps"; ho_fetch >/dev/null 2>&1; sed -n '/^## Next steps/,/^## Session log/p' "$HOFF/HANDOFF.md" 2>/dev/null | sed '$d'
+    say; say "## L. Levers: mtd check | sync | save REPO msg [paths] | push REPO --approved | backup | build paper | status | ask | handoff pull/push  (all one-line, self-verifying)"
+    return 0; fi
   say; say "## 1. Non-negotiable rules (full text: $ROOT/AGENTS.md; project rules: CLUSTER_PROJECT_ROOT/AGENTS.md)"
   sed -n '/^## 2\. /,/^## 3\. /p' "$ROOT/AGENTS.md" | sed '1d;$d'
   say; say "## 2. Live state"
@@ -530,7 +572,9 @@ cmd_brief() {
   say "2. Take a lock for shared work (mtd lock acquire NAME --ttl MIN); journal milestones (mtd journal \"...\")."
   say "3. Long work only via mtd run / mtd submit; data only via stage/harvest; never compute on the cluster login node."
   say "4. END OF SESSION (mandatory): mtd handoff pull → edit state/handoff/HANDOFF.md in place (state, runs, ledger, decisions, next steps) → mtd handoff push \"summary\"."
-  say; say "## 7. Where things are"
+  say; say "## 7. Levers (one line each, self-verifying; read the operating manual: $WORKSPACE/AGENTS.md)"
+  [ -f "$CTRL/README.md" ] && sed -n '/^## Levers/,$p' "$CTRL/README.md" | sed '1,4d'
+  say; say "## 8. Where things are"
   say "- portal: $ROOT  (docs/network.md, docs/storage.md, docs/runbook.md)"
   say "- config: $CONF   discovery: $STATE/discovery/latest/"
   say "- cluster project checkout: ${CLUSTER_PROJECT_ROOT:-unset}   work root: ${CLUSTER_WORK_ROOT:-unset}   group: ${CLUSTER_GROUP_ROOT:-unset}"
@@ -542,6 +586,155 @@ cmd_agent() { # claude|codex [task...] — start an agent CLI in the portal with
   export MD_AGENT="${MD_AGENT:-$tool-$(date +%m%d%H%M)}"
   cmd_brief > "$STATE/BRIEF.md" 2>&1
   cd "$ROOT" && exec "$tool" "You are $MD_AGENT. First read $STATE/BRIEF.md completely (rules, live state, living handoff). Then: ${*:-continue from 'Next steps' #1 in the handoff}. At the end of the session update the handoff with mtd handoff pull/push."; }
+
+
+# ======================================================================
+# LEVERS: one command, one line of output, self-verifying. (-v = verbose)
+# ======================================================================
+cmd_check() { # registry + guard + routes + asks, one line each
+  local rc=0 l
+  if [ -f "$CTRL/tools/kg_check.py" ]; then l=$(python3 "$CTRL/tools/kg_check.py" 2>&1); echo "$l" | head -1; case "$l" in FAIL*) rc=1; [ $VERBOSE = 1 ] && echo "$l";; esac
+  else fail "kg no control plane at $CTRL -> mtd sync"; rc=1; fi
+  if [ -d "$PROJECT_DIR/.git" ]; then l=$(cd "$PROJECT_DIR" && python3 control/tools/repo_guard.py --staged 2>&1); echo "$l" | head -1; case "$l" in FAIL*) rc=1;; esac
+    [ "$(git -C "$PROJECT_DIR" config core.hooksPath)" = control/hooks ] && okl "hooks active" || { fail "hooks not active -> git -C $PROJECT_DIR config core.hooksPath control/hooks"; rc=1; }; fi
+  local h a; for h in rudra cluster; do a=$(route "$h") && okl "route $h $a" || { fail "route $h unreachable -> mtd doctor"; rc=1; }; done
+  l=$(remote_ro rudra ask-list 2>/dev/null | grep -c '^#'); [ "${l:-0}" -gt 0 ] && echo "WARN asks $l open (mtd ask --list)" || okl "asks 0 open"
+  return $rc; }
+
+cmd_sync() { # fetch + fast-forward every workspace repo; never merges, never discards
+  local r d b up ahead behind dirty rc=0
+  for r in $WS_REPOS; do d="$WORKSPACE/$r"; [ -d "$d/.git" ] || { fail "sync $r missing -> rerun bootstrap"; rc=1; continue; }
+    to 120 git -C "$d" fetch -q --prune origin 2>/dev/null || { fail "sync $r fetch failed (network/auth) -> retry later or mtd ask"; rc=1; continue; }
+    b=$(git -C "$d" rev-parse --abbrev-ref HEAD); up=$(git -C "$d" rev-parse --abbrev-ref '@{u}' 2>/dev/null)
+    dirty=$(git -C "$d" status --porcelain --untracked-files=no | wc -l | tr -d ' ')
+    if [ -z "$up" ]; then okl "sync $r $b $(git -C "$d" rev-parse --short HEAD) (no upstream; local branch) dirty=$dirty"; continue; fi
+    set -- $(git -C "$d" rev-list --left-right --count HEAD...'@{u}'); ahead=$1; behind=$2
+    if [ "$behind" -gt 0 ] && [ "$ahead" = 0 ]; then
+      git -C "$d" merge -q --ff-only '@{u}' 2>/dev/null || { fail "sync $r cannot fast-forward (local edits overlap) -> commit with mtd save, then mtd sync"; rc=1; continue; }
+    elif [ "$behind" -gt 0 ]; then fail "sync $r diverged (ahead $ahead, behind $behind) -> git -C $d rebase @{u} (resolve) or ask the PI"; rc=1; continue; fi
+    [ "$(git -C "$d" rev-list --count '@{u}..HEAD')" = "$ahead" ] && okl "sync $r $b $(git -C "$d" rev-parse --short HEAD) ahead=$ahead behind=0 dirty=$dirty"
+  done; return $rc; }
+
+cmd_save() { # REPO "message" [paths...]: commit locally (hooks enforce guards). No paths = tracked changes only.
+  local d msg before n; d=$(repo_dir "$1") || die "save: unknown repo '$1' (one of: $WS_REPOS)"; msg=$2; shift 2 2>/dev/null
+  [ -n "$msg" ] || die 'mtd save REPO "message" [paths...]'
+  before=$(git -C "$d" rev-parse HEAD 2>/dev/null)
+  if [ $# -gt 0 ]; then git -C "$d" add -- "$@" || { fail "save add failed"; return 1; }; else git -C "$d" add -u; fi
+  n=$(git -C "$d" diff --cached --name-only | wc -l | tr -d ' '); [ "$n" -gt 0 ] || { okl "save $(basename "$d") nothing to commit"; return 0; }
+  if ! out=$(git -C "$d" commit -q -m "$msg" -m "Agent: $AGENT" 2>&1); then fail "save $(basename "$d") refused: $(echo "$out" | grep -E 'FAIL|error' | head -3 | tr '\n' ' ') -> fix and retry"; return 1; fi
+  [ "$(git -C "$d" rev-parse HEAD)" != "$before" ] || { fail "save no new commit"; return 1; }
+  if [ $# -gt 0 ] && [ -n "$(git -C "$d" status --porcelain -- "$@")" ]; then fail "save committed but paths still dirty: $*"; return 1; fi
+  okl "save $(basename "$d") $(git -C "$d" rev-parse --short HEAD) $n files"; }
+
+push_allowed() { [ "$BACKUP_STANDING_APPROVAL" = yes ] && return 0; need_approval "$1"; }
+cmd_push() { # REPO|all: push current branch to GitHub (upload: PI approval or standing approval); verify remote sha
+  local r d b sha rs rc=0 list
+  [ "$1" = all ] && list=$WS_REPOS || { d=$(repo_dir "$1") || die "push: unknown repo '$1'"; list=$(basename "$d"); }
+  push_allowed "push $list to GitHub (code/docs only; data is blocked by guards)" || exit 2
+  for r in $list; do d="$WORKSPACE/$r"; [ -d "$d/.git" ] || continue
+    b=$(git -C "$d" rev-parse --abbrev-ref HEAD); sha=$(git -C "$d" rev-parse HEAD)
+    if ! out=$(to 300 git -C "$d" push -q -u origin "$b" 2>&1); then fail "push $r $b: $(echo "$out" | grep -E 'FAIL|rejected|error|denied' | head -2 | tr '\n' ' ') -> mtd sync, fix, retry"; rc=1; continue; fi
+    rs=$(to 60 git -C "$d" ls-remote origin "refs/heads/$b" | cut -f1)
+    [ "$rs" = "$sha" ] && okl "push $r $b ${sha:0:7} verified" || { fail "push $r remote $rs != local $sha"; rc=1; }
+  done; return $rc; }
+
+wip_snapshot() { # DIR -> prints a commit sha capturing tracked + small untracked work, without touching index/worktree
+  local d=$1 tmp f sz files=""; tmp=$(mktemp); git -C "$d" read-tree --index-output="$tmp" HEAD 2>/dev/null || { rm -f "$tmp"; return 1; }
+  ( cd "$d" && export GIT_INDEX_FILE="$tmp"
+    git add -u 2>/dev/null
+    git ls-files --others --exclude-standard | while IFS= read -r f; do
+      case "$f" in *.npy|*.npz|*.pt|*.pth|*.ckpt|*.safetensors|*.bin|*.h5|*.hdf5|*.ply|*.glb|*.obj|*.exr|*.tar|*.tar.gz|*.tgz|*.zip|*.7z|*.mp4|*.mkv|data/*|outputs/*) continue;; esac
+      sz=$(wc -c < "$f" 2>/dev/null || echo 0); [ "$sz" -lt 20971520 ] && git add -- "$f" 2>/dev/null
+    done
+    t=$(git write-tree) && [ "$t" != "$(git rev-parse 'HEAD^{tree}')" ] && git commit-tree "$t" -p HEAD -m "WIP snapshot $(date -u +%FT%TZ) by $AGENT on $(hostname -s)" )
+  rm -f "$tmp"; }
+
+cmd_backup() { # mirror every repo (all branches + a WIP snapshot ref) to rudra; push branches to GitHub if standing approval
+  case "$1" in install|uninstall|status) backup_agent "$1"; return;; esac
+  [ "$1" = --auto ] && [ "$BACKUP_STANDING_APPROVAL" != yes ] && { echo "$(date '+%F %T') skipped: no standing approval" >> "$STATE/backup.log"; return 0; }
+  push_allowed "back up all workspace repos to rudra mirrors (and GitHub)" || exit 2
+  local r d url w ts rc=0 n; ts=$(date -u +%Y%m%dT%H%M%SZ); route rudra >/dev/null || { fail "backup rudra unreachable -> mtd doctor"; return 1; }
+  for r in $WS_REPOS; do d="$WORKSPACE/$r"; [ -d "$d/.git" ] || continue
+    rssh rudra "mkdir -p ~/mdops-state/mirrors && cd ~/mdops-state/mirrors && { [ -d $r.git ] || git init -q --bare $r.git; }" || { fail "backup $r cannot create mirror"; rc=1; continue; }
+    url="md-rudra:mdops-state/mirrors/$r.git"
+    to 600 git -C "$d" push -q "$url" 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' 2>/dev/null || { fail "backup $r push to rudra failed"; rc=1; continue; }
+    w=$(wip_snapshot "$d"); [ -n "$w" ] && to 300 git -C "$d" push -q "$url" "$w:refs/backups/$(hostname -s)/$ts" 2>/dev/null
+    n=$(git -C "$d" for-each-ref --format='%(objectname) %(refname:short)' refs/heads | while read -r sha ref; do [ "$(git -C "$d" ls-remote "$url" "refs/heads/$ref" | cut -f1)" = "$sha" ] || echo x; done | wc -l | tr -d ' ')
+    [ "$n" = 0 ] && okl "backup $r rudra ok${w:+ +wip ${w:0:7}}" || { fail "backup $r $n branch(es) not verified on rudra"; rc=1; }
+  done
+  [ "$BACKUP_STANDING_APPROVAL" = yes ] && { cmd_push all || rc=1; }
+  echo "$(date '+%F %T') backup rc=$rc" >> "$STATE/backup.log"; return $rc; }
+
+backup_agent() { local plist="$HOME/Library/LaunchAgents/au.anu.mdops.backup.plist"
+  case "$1" in
+    install) mkdir -p "$HOME/Library/LaunchAgents"; cat > "$plist" <<EOF3
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>au.anu.mdops.backup</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$ROOT/bin/mdops</string><string>backup</string><string>--auto</string></array>
+  <key>EnvironmentVariables</key><dict><key>MD_AGENT</key><string>backup-agent</string></dict>
+  <key>StartInterval</key><integer>7200</integer>
+  <key>StandardErrorPath</key><string>$STATE/backup.err</string>
+</dict></plist>
+EOF3
+      launchctl unload "$plist" 2>/dev/null; launchctl load -w "$plist" && okl "backup agent every 2h (runs only with standing approval)";;
+    uninstall) launchctl unload -w "$plist" 2>/dev/null; rm -f "$plist"; okl "backup agent removed";;
+    *) [ -f "$plist" ] && okl "backup agent installed; last: $(tail -1 "$STATE/backup.log" 2>/dev/null)" || echo "WARN backup agent not installed (mtd backup install)";;
+  esac; }
+
+cmd_build() { # paper: compile; one line with pages, undefined refs/citations, warnings
+  [ "${1:-paper}" = paper ] || die "mtd build paper"
+  local d="$PAPER_DIR" out="$STATE/build/paper" lm log pages undef warn
+  [ -f "$d/main.tex" ] || { fail "build no $d/main.tex -> mtd sync"; return 1; }
+  lm=$(command -v latexmk || ls /Library/TeX/texbin/latexmk 2>/dev/null) || { fail "build latexmk not found -> install TeX Live / MacTeX (or mtd ask)"; return 1; }
+  mkdir -p "$out"; ( cd "$d" && to 600 "$lm" -pdf -interaction=nonstopmode -halt-on-error -outdir="$out" main.tex >/dev/null 2>&1 ); log="$out/main.log"
+  pages=$(grep -o 'Output written on .*(\([0-9]*\) page' "$log" 2>/dev/null | grep -o '([0-9]*' | tr -d '(')
+  undef=$(grep -ciE 'undefined (references|citations)|Citation .* undefined|Reference .* undefined' "$log" 2>/dev/null); warn=$(grep -c 'Warning' "$log" 2>/dev/null)
+  if [ -n "$pages" ] && [ "$out/main.pdf" -nt "$d/main.tex" ]; then okl "build paper $pages pages undefined=$undef warnings=$warn pdf=$out/main.pdf"
+  else fail "build paper failed: $(grep -m1 '^!' "$log" 2>/dev/null) -> see $log"; fi; }
+
+cmd_env() { # snapshot rudra | snapshot cluster | fetch cluster RUN_ID  -> control/envs/<host>/
+  local host=$2 dest="$CTRL/envs/$2" n
+  case "$1 $host" in
+    "snapshot rudra") mkdir -p "$dest"; remote rudra env-snapshot | tar -C "$dest" -xf - || { fail "env rudra snapshot failed"; return 1; }
+       n=$(ls "$dest"/*.yml 2>/dev/null | wc -l | tr -d ' '); [ -s "$dest/system.txt" ] && okl "env rudra $n envs -> control/envs/rudra (mtd save $PROJECT_REPO \"env snapshot rudra\" control/envs/rudra)" || fail "env rudra wrote nothing";;
+    "snapshot cluster") need_conf CLUSTER_WORK_ROOT
+       local rs="$CLUSTER_WORK_ROOT/mdops-state/bin/mdops-remote.sh"
+       rssh cluster "mkdir -p $(q "$CLUSTER_WORK_ROOT/mdops-state/bin") && cat > $(q "$rs")" < "$REMOTE" || { fail "env cannot copy helper to cluster"; return 1; }
+       cmd_run cluster --job job:env-snapshot --dir "$CLUSTER_WORK_ROOT" --allow-dirty --no-gpu --time 00:20:00 --mem 4G --cpus 2 -- \
+         bash -c "mkdir -p \$MD_OUT_DIR/envs && MD_STATE=$(q "$CLUSTER_WORK_ROOT/mdops-state") bash $(q "$rs") env-snapshot | tar -C \$MD_OUT_DIR/envs -xf -" | sed -n 's/^RUN /NOTE env cluster job run id /p'
+       echo "NOTE when it finishes: mtd env fetch cluster <run id>";;
+    "fetch cluster") need_conf CLUSTER_WORK_ROOT; [ -n "$3" ] || die "mtd env fetch cluster RUN_ID"; mkdir -p "$dest"
+       rssh cluster "tar -C $(q "$CLUSTER_WORK_ROOT/runs/$3/envs") -cf - ." | tar -C "$dest" -xf - && okl "env cluster fetched -> control/envs/cluster" || fail "env fetch failed (job finished? mtd status $3)";;
+    *) die "mtd env snapshot rudra|cluster | mtd env fetch cluster RUN_ID";;
+  esac; }
+
+cmd_ledger() { # verify: every valid result's run id exists in a run index
+  [ "$1" = verify ] || die "mtd ledger verify"; local f="$CTRL/registry/results.yaml" ids miss=0 n=0 id h
+  ids=$(awk '/^- id:/{v=0} /^  status: valid/{v=1} /^  run_id:/{r=$2} /^- id:|^$/{if(v&&r)print r; r=""} END{if(v&&r)print r}' "$f" | sort -u)
+  for id in $ids; do n=$((n+1)); case "$id" in *-cluster-*) h=cluster;; *) h=rudra;; esac
+    remote_ro "$h" run-status "$id" >/dev/null 2>&1 || { echo "  missing run $id on $h"; miss=$((miss+1)); }; done
+  [ $miss = 0 ] && okl "ledger $n valid results, all runs found" || fail "ledger $miss of $n run ids not found -> fix results.yaml"; }
+
+cmd_ask() { # "what — why" | --list [--all] | --close N "resolution"
+  case "$1" in
+    --list) remote_ro rudra ask-list "$2" 2>/dev/null || cat "$STATE/asks-offline.tsv" 2>/dev/null ;;
+    --close) [ "$AGENT" = human ] || die "only the PI closes asks"; remote rudra ask-close "$2" "$3" ;;
+    ""|-h) die 'mtd ask "<what you cannot access> — <why you need it>"' ;;
+    *) remote rudra ask-add "$AGENT" "$*" 2>/dev/null || { printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$AGENT" "$*" >> "$STATE/asks-offline.tsv"; okl "ask saved offline (rudra unreachable)"; }
+       echo "NOTE now ask the PI in chat as well; do not work around the missing access" ;;
+  esac; }
+
+cmd_resources() { # everything currently in use, compactly
+  local g j
+  g=$(rssh_ro rudra 'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1; tmux ls 2>/dev/null | grep -c "^md-"; df -h ~ | awk "NR==2{print \$5}"' 2>/dev/null | tr '\n' ' ')
+  [ -n "$g" ] && set -- $g && echo "rudra   gpu=${1%,}% mem=${2%,}/${3}MiB  md-runs=${4:-0}  home=${5:-?}" || echo "rudra   unreachable"
+  j=$(rssh_ro cluster 'squeue -u $USER -h -o "%T" 2>/dev/null | sort | uniq -c | tr "\n" " "' 2>/dev/null)
+  echo "cluster jobs: ${j:-none}  storage: $( [ -n "$CLUSTER_WORK_ROOT" ] && remote_ro cluster usage "$CLUSTER_WORK_ROOT" 2>/dev/null || echo 'work root unset')"
+  echo "locks:   $(remote_ro rudra lock list 2>/dev/null | tr '\n' ';' | sed 's/;$//')"
+  echo "asks:    $(remote_ro rudra ask-list 2>/dev/null | grep -c '^#') open"
+  echo "routes:  rudra=$(route rudra || echo DOWN) cluster=$(route cluster || echo DOWN)"; }
 
 # ---------- discovery (read-only everywhere) ----------
 ssh_g() { ssh -G "$1" 2>/dev/null | awk -v k="$2" '$1==k{ $1=""; sub(/^ /,""); print }'; }
@@ -644,7 +837,7 @@ EOF
 
 # ---------- dispatch ----------
 # pull a global --approved "..." out of the arguments
-_a=(); while [ $# -gt 0 ]; do if [ "$1" = --approved ]; then APPROVED=$2; shift 2; else _a+=("$1"); shift; fi; done
+_a=(); while [ $# -gt 0 ]; do case "$1" in --approved) APPROVED=$2; shift 2;; -v) VERBOSE=1; shift;; *) _a+=("$1"); shift;; esac; done
 set -- ${_a[@]+"${_a[@]}"}
 c=${1:-help}; shift 2>/dev/null
 case "$c" in
@@ -654,6 +847,8 @@ case "$c" in
   ssh) cmd_ssh "$@" ;;  open) cmd_open "$@" ;;  tunnel) cmd_tunnel "$@" ;;
   lock) cmd_lock "$@" ;;  journal) cmd_journal "$@" ;;
   run) cmd_run "$@" ;;  cancel) cmd_cancel "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
+  check) cmd_check ;;  sync) cmd_sync ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
+  build) cmd_build "$@" ;;  env) cmd_env "$@" ;;  ledger) cmd_ledger "$@" ;;  ask) cmd_ask "$@" ;;  resources) cmd_resources ;;
   profile) cmd_profile "$@" ;;  brief) cmd_brief "$@" ;;  handoff) cmd_handoff "$@" ;;  agent) cmd_agent "$@" ;;
   agent-key) cmd_agent_key "$@" ;;
   submit) cmd_submit "$@" ;;  census) cmd_census "$@" ;;  keepalive) cmd_keepalive "$@" ;;

@@ -1,5 +1,9 @@
 # mdops — rules for every agent (read fully before your first command)
 
+> In the MatterDoor workspace the **operating manual is `../AGENTS.md`**
+> (how to start, cadence, compute budget, permissions, end of session).
+> This file covers the portal itself.
+
 This checkout is the access portal from the Mac to **rudra** (office Linux box,
 RTX 4090) and the **ANU CECS Slurm cluster**. Every remote action goes through
 `mdops`. Never hand-roll `ssh`, `scp`, or `rsync` to these machines, and never
@@ -134,6 +138,12 @@ Code flows through GitHub. Commit and push, then `git pull` on the host.
 mtd                                  BRIEFING: rules, live state, runs, journal, living handoff (run first, always)
 mtd handoff show|pull|push "sum"|release|log|init    the single co-evolving handoff (versioned on rudra)
 mtd agent claude|codex ["task"]      start an agent CLI in the portal, pre-briefed
+mtd brief --short                    ≤30-line briefing (after the full one earlier the same day)
+mtd check | sync | status            one-line checks / fast-forward all repos / resources in use
+mtd save REPO "msg" [paths]          local commit (guards run in hooks); verified
+mtd push REPO|all --approved "..."   upload to GitHub; verified against ls-remote
+mtd backup [install|status]          mirror all repos + uncommitted work to rudra (+GitHub with standing approval)
+mtd build paper | env snapshot rudra|cluster | ledger verify | ask "what — why"
 mdops agent-key init|authorize --yes|use|revoke --yes   restricted key for sandboxed agents
 mdops doctor                         health of routes, keepalive, rudra, cluster storage, locks
 mdops net status|up|ping|netcheck    Tailscale on this Mac (+ GlobalProtect presence); 'down --yes' is human-only
@@ -145,9 +155,10 @@ mdops open rudra|cluster             HUMAN: tmux session (mosh to rudra when ava
 mdops tunnel rudra 8888 [local]      forward a port (Jupyter/TensorBoard) over the live connection
 mdops lock acquire|release|list NAME [--ttl MIN]
 mdops journal "msg" | --tail N
-mdops run rudra --name N --dir REPO [--allow-dirty] [--no-gpu] -- CMD...      tmux + GPU queue on rudra
-mdops run cluster --name N --dir REPO --no-gpu [--time --mem --cpus] -- CMD   CPU Slurm job
-mdops submit cluster/JOB.sh [--check]                                        GPU job via the project guard
+mdops run rudra --job job:ID --dir REPO [--allow-dirty] [--no-gpu] -- CMD... tmux + GPU queue on rudra
+mdops run cluster --job job:ID --dir REPO --no-gpu [--time --mem --cpus] -- CMD   CPU Slurm job
+mdops submit cluster/JOB.sh --job job:ID [--check]                             GPU job via the project guard
+(agents: --job must be declared in control/registry/jobs.yaml; GPU jobs must be PI-approved)
 mdops runs [rudra|cluster] | mdops status RUN_ID | mdops cancel RUN_ID (own runs only)
 mdops quota | mdops census           storage usage (census = du inside a Slurm CPU job)
 mdops stage RUDRA_PATH [--name N] [--yes]       rudra -> cluster work/stage (resumable, retried)
