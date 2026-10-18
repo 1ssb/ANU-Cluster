@@ -5,8 +5,8 @@
 # Flags: --install-tailscale   install Tailscale from its official apt repo if missing
 #        --dry-run             print what would change, change nothing
 set -uo pipefail
-DRY=0; INSTALL_TS=0; CHOST=
-for a in "$@"; do case "$a" in --dry-run) DRY=1;; --install-tailscale) INSTALL_TS=1;; --cluster-host=*) CHOST=${a#*=};; esac; done
+DRY=0; INSTALL_TS=0; CHOST=; HEADLESS=0
+for a in "$@"; do case "$a" in --dry-run) DRY=1;; --install-tailscale) INSTALL_TS=1;; --headless) HEADLESS=1;; --cluster-host=*) CHOST=${a#*=};; esac; done
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
 U="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 UNDO=()
@@ -112,6 +112,17 @@ wifi.powersave = 2"
 
 echo "== 7. GPU persistence mode (faster, steadier CUDA start-up)"
 command -v nvidia-smi >/dev/null && do_ "nvidia-smi -pm 1 >/dev/null && systemctl enable --now nvidia-persistenced 2>/dev/null; true"
+
+echo "== 8. headless (boot without the desktop: frees GPU memory and avoids display-manager sleep/lock)"
+if [ $HEADLESS = 1 ]; then
+  if [ "$(systemctl get-default)" != multi-user.target ]; then do_ systemctl set-default multi-user.target; UNDO+=("systemctl set-default graphical.target"); echo "   (takes effect at next reboot; nothing is stopped now)"
+  else echo "= already headless"; fi
+else echo "= skipped (add --headless)"; fi
+
+echo "== 9. both uplinks (office LAN + dongle) stay managed; LAN preferred"
+command -v nmcli >/dev/null && nmcli -t -f DEVICE,TYPE,STATE device | grep -vE ':(loopback|bridge|tun|wireguard)' | sed 's/^/   /'
+command -v nmcli >/dev/null && for c in $(nmcli -t -f NAME,TYPE connection show | awk -F: '$2 ~ /ethernet|wireless|gsm/ {print $1}' | tr ' ' '#'); do c=${c//#/ }
+  do_ "nmcli connection modify \"$c\" connection.autoconnect yes"; done
 
 echo; echo "== done. Undo, if ever needed:"; for u in "${UNDO[@]}"; do echo "   sudo $u"; done
 echo "   (then: sudo systemctl daemon-reload; sudo systemctl reload ssh)"

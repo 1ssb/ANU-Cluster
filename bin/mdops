@@ -396,6 +396,8 @@ cmd_doctor() {
       to 8 "$TS_BIN" status 2>/dev/null | grep -F "$RUDRA_TS_HOST" | grep -q offline && warn "rudra shows OFFLINE in Tailscale" || ok "rudra listed on the tailnet ($RUDRA_TS_HOST)"
     else warn "rudra is not on Tailscale yet (docs/network.md step 1)"; fi
   else warn "Tailscale not running on this Mac (mdops net up)"; fi
+  if [ "$(uname)" = Darwin ]; then pgrep -fq 'caffeinate -i -s' && ok "Mac kept awake" || warn "Mac may sleep (mtd awake on)"
+    launchctl list 2>/dev/null | grep -q au.anu.mdops.keepalive && ok "keepalive + Tailscale watchdog running" || warn "keepalive not running (mtd keepalive install)"; fi
   for h in rudra cluster; do
     t0=$(date +%s); a=$(route "$h"); t1=$(date +%s)
     if [ -n "$a" ]; then ok "$h reachable via $a ($((t1-t0))s to pick route)"
@@ -425,6 +427,14 @@ cmd_keepalive() { # install | uninstall | status | tick  — macOS launchd agent
   local plist="$HOME/Library/LaunchAgents/au.anu.mdops.keepalive.plist" log="$STATE/keepalive.log" a
   case "${1:-status}" in
     tick)
+      # 1. this Mac's Tailscale: start the app if it quit, bring the tunnel up if it stopped
+      if [ "$(uname)" = Darwin ] && [ -d /Applications/Tailscale.app ] && ! pgrep -xq Tailscale; then open -ga Tailscale && echo "$(date '+%F %T') started Tailscale app" >> "$log"; sleep 5; fi
+      if [ -n "$TS_BIN" ]; then
+        tst=$("$TS_BIN" status --json 2>/dev/null | tr -d ' \n' | grep -o '"BackendState":"[A-Za-z]*"' | head -1 | cut -d'"' -f4)
+        case "$tst" in Running|"") ;; Stopped) "$TS_BIN" up >/dev/null 2>&1 && echo "$(date '+%F %T') tailscale up (was Stopped)" >> "$log";;
+          *) echo "$(date '+%F %T') tailscale state $tst (NeedsLogin = the PI signs in from the menu bar)" >> "$log";; esac
+      fi
+      # 2. reopen dropped ssh masters
       for a in md-rudra md-cluster; do
         ssh -O check "$a" >/dev/null 2>&1 && continue
         if to 40 ssh -n -o BatchMode=yes -o ConnectTimeout=12 -fN "$a" >/dev/null 2>&1; then echo "$(date '+%F %T') reopened $a" >> "$log"
@@ -759,9 +769,29 @@ cmd_setup() { # finish or repair the installation; human at a terminal only
     2) if cmd_handoff init >/dev/null 2>&1; then okl "setup handoff created on rudra"; else fail "setup handoff init"; rc=1; fi;;
     0) okl "setup handoff present";; *) fail "setup handoff unreachable"; rc=1;; esac
   cmd_env snapshot rudra | head -1
+  if [ "$(uname)" = Darwin ]; then cmd_awake on; cmd_keepalive install | sed 's/^PASS/OK/'; fi
   if [ "$BACKUP_STANDING_APPROVAL" != yes ]; then printf 'Backups to GitHub + rudra are OFF. Allow agents to back up code and documents (never data) automatically? [y/N] '; read -r ans </dev/tty
     case "$ans" in y|Y|yes) sed -i.bak 's/^BACKUP_STANDING_APPROVAL=.*/BACKUP_STANDING_APPROVAL=yes/' "$CONF" && rm -f "$CONF.bak" && cmd_journal "PI set BACKUP_STANDING_APPROVAL=yes (mtd setup)" >/dev/null && okl "setup backups on";; *) okl "setup backups stay off (agents ask before each push)";; esac; fi
   cmd_check || rc=1; return $rc; }
+
+
+cmd_awake() { # on|off|status: keep this Mac from idle/system sleep (caffeinate as a LaunchAgent). Lid-closed sleep still needs power + external display.
+  local plist="$HOME/Library/LaunchAgents/au.anu.mdops.awake.plist"
+  [ "$(uname)" = Darwin ] || die "awake is for the Mac (rudra: mtd harden-rudra)"
+  case "${1:-status}" in
+    on) mkdir -p "$HOME/Library/LaunchAgents"; cat > "$plist" <<EOF4
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>au.anu.mdops.awake</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-i</string><string>-s</string></array>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+</dict></plist>
+EOF4
+       launchctl unload "$plist" 2>/dev/null; launchctl load -w "$plist" && okl "awake on: no idle/system sleep (display may still sleep; closing the lid sleeps unless on power with an external display)";;
+    off) launchctl unload -w "$plist" 2>/dev/null; rm -f "$plist"; okl "awake off";;
+    *) pgrep -fq 'caffeinate -i -s' && okl "awake on" || echo "WARN awake off (mtd awake on)";;
+  esac; }
 
 # ---------- discovery (read-only everywhere) ----------
 ssh_g() { ssh -G "$1" 2>/dev/null | awk -v k="$2" '$1==k{ $1=""; sub(/^ /,""); print }'; }
@@ -881,7 +911,7 @@ case "$c" in
   ssh) cmd_ssh "$@" ;;  open) cmd_open "$@" ;;  tunnel) cmd_tunnel "$@" ;;
   lock) cmd_lock "$@" ;;  journal) cmd_journal "$@" ;;
   run) cmd_run "$@" ;;  cancel) cmd_cancel "$@" ;;  runs) cmd_runs "$@" ;;  status) cmd_status "$@" ;;
-  setup) cmd_setup ;;  check) cmd_check ;;  sync) cmd_sync ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
+  setup) cmd_setup ;;  awake) cmd_awake "$@" ;;  check) cmd_check ;;  sync) cmd_sync ;;  save) cmd_save "$@" ;;  push) cmd_push "$@" ;;  backup) cmd_backup "$@" ;;
   build) cmd_build "$@" ;;  env) cmd_env "$@" ;;  ledger) cmd_ledger "$@" ;;  ask) cmd_ask "$@" ;;  resources) cmd_resources ;;
   profile) cmd_profile "$@" ;;  brief) cmd_brief "$@" ;;  handoff) cmd_handoff "$@" ;;  agent) cmd_agent "$@" ;;
   agent-key) cmd_agent_key "$@" ;;
