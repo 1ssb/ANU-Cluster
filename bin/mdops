@@ -281,7 +281,8 @@ cmd_stage() { # PATH [--from rudra|mac] [--name N] [--yes]   -> cluster work/sta
   while [ $# -gt 0 ]; do case "$1" in --name) name=$2; shift;; --yes) yes=1;; --from) from=$2; shift;; esac; shift; done
   need_conf CLUSTER_WORK_ROOT; [ -n "$src" ] || die "mtd stage PATH [--from rudra|mac] [--name NAME] [--yes]"
   name=${name:-$(basename "$src")}
-  remote cluster storage-gate "$CLUSTER_WORK_ROOT" "$CLUSTER_QUOTA_STOP_PCT:$CLUSTER_MIN_FREE_GB" >/dev/null || exit 2
+  if [ $yes = 1 ]; then remote cluster storage-gate "$CLUSTER_WORK_ROOT" "$CLUSTER_QUOTA_STOP_PCT:$CLUSTER_MIN_FREE_GB" >/dev/null || exit 2
+  else remote cluster storage-gate "$CLUSTER_WORK_ROOT" "$CLUSTER_QUOTA_STOP_PCT:$CLUSTER_MIN_FREE_GB" >/dev/null 2>&1 || warn "the real transfer would be refused now: cluster below the ${CLUSTER_MIN_FREE_GB}G free floor"; fi
   if [ "$from" = mac ]; then
     [ -e "$src" ] || die "no such local path: $src"; local a n=-n i ok=1; a=$(route_or_die cluster) || exit 2
     [ $yes = 1 ] && { need_approval "upload mac:$src -> cluster stage/$name"; n=; }
