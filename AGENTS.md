@@ -171,7 +171,8 @@ mdops journal "msg" | --tail N
 mdops run rudra --job job:ID --dir REPO [--allow-dirty] [--no-gpu] -- CMD... tmux + GPU queue on rudra
 mdops run cluster --job job:ID --dir REPO --no-gpu [--time --mem --cpus] -- CMD   CPU Slurm job
 mdops submit cluster/JOB.sh --job job:ID [--check] [--allow-dirty]             GPU job via the project guard; run record + $MD_OUT_DIR
-mtd sync cluster                     fast-forward the cluster's project checkout (where job scripts live); never switches branch
+mtd sync cluster [--keep-local]      fast-forward the cluster's project checkout (where job scripts live); never switches branch
+                                     --keep-local (PI approval): also when it has uncommitted files, if no incoming change touches them
 mtd cluster-wip                      copy the cluster checkout's uncommitted tracked changes into git (control/wip/), checkout untouched
 (agents: --job must be declared in control/registry/jobs.yaml; GPU jobs must be PI-approved)
 mdops runs [rudra|cluster] | mdops status RUN_ID | mdops cancel RUN_ID (own runs only)

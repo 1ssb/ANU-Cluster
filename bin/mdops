@@ -674,19 +674,25 @@ cmd_check() { # registry + guard + routes + asks, one line each
   l=$(remote_ro "$(hub)" ask-list 2>/dev/null | grep -c '^#'); [ "${l:-0}" -gt 0 ] && echo "WARN asks $l open (mtd ask --list)" || okl "asks 0 open"
   return $rc; }
 
-sync_cluster() { # fast-forward the cluster's project checkout (job scripts are submitted from there); never switches branch
-  need_conf CLUSTER_PROJECT_ROOT; local o
-  o=$(rssh cluster "cd $(q "$CLUSTER_PROJECT_ROOT") || exit 3; b=\$(git rev-parse --abbrev-ref HEAD); d=\$(git status --porcelain --untracked-files=no | wc -l)
+sync_cluster() { # [--keep-local]: fast-forward the cluster's project checkout (job scripts are submitted from there); never switches branch
+  # --keep-local (PI approval each time): fast-forward even though the checkout has uncommitted changes, only when no incoming
+  # change touches a locally modified file; git's own --ff-only check refuses too. The local changes stay exactly as they are.
+  need_conf CLUSTER_PROJECT_ROOT; local o keep=0; [ "$1" = --keep-local ] && keep=1
+  [ $keep = 1 ] && need_approval "fast-forward the cluster checkout keeping its uncommitted files as they are"
+  o=$(rssh cluster "keep=$keep; cd $(q "$CLUSTER_PROJECT_ROOT") || exit 3; b=\$(git rev-parse --abbrev-ref HEAD); d=\$(git status --porcelain --untracked-files=no | wc -l)
     timeout 60 git fetch -q origin \"\$b\" 2>/dev/null || { echo \"FAIL fetch \$b\"; exit 1; }
     set -- \$(git rev-list --left-right --count HEAD...FETCH_HEAD); echo \"branch=\$b head=\$(git rev-parse --short HEAD) dirty=\$d ahead=\$1 behind=\$2\"
-    if [ \"\$2\" -gt 0 ] && [ \"\$1\" = 0 ] && [ \"\$d\" = 0 ]; then git merge -q --ff-only FETCH_HEAD && echo \"ff=\$(git rev-parse --short HEAD)\"; fi" 2>&1)
+    if [ \"\$2\" -gt 0 ] && [ \"\$1\" = 0 ] && [ \"\$d\" = 0 ]; then git merge -q --ff-only FETCH_HEAD && echo \"ff=\$(git rev-parse --short HEAD)\"
+    elif [ \"\$2\" -gt 0 ] && [ \"\$1\" = 0 ] && [ \"\$keep\" = 1 ]; then
+      ov=\$(comm -12 <(git diff --name-only HEAD FETCH_HEAD | sort) <(git status --porcelain --untracked-files=no | cut -c4- | sort) | wc -l)
+      if [ \"\$ov\" = 0 ] && git merge -q --ff-only FETCH_HEAD; then echo \"ff=\$(git rev-parse --short HEAD) kept=\$(git status --porcelain --untracked-files=no | wc -l)\"; else echo \"OVERLAP=\$ov\"; fi; fi" 2>&1)
   case "$o" in *"ff="*) okl "sync cluster checkout $(printf '%s' "$o" | tr '\n' ' ')";;
     *"behind=0"*) okl "sync cluster checkout up to date: $(printf '%s' "$o" | tr '\n' ' ')";;
     *branch=*) fail "sync cluster checkout not fast-forwarded: $(printf '%s' "$o" | tr '\n' ' ') -> dirty or diverged: ask the PI (never reset it)"; return 1;;
     *) fail "sync cluster checkout: ${o:-unreachable} -> mtd doctor (the login node may lack GitHub access: mtd ask)"; return 1;; esac; }
 
 cmd_sync() { # fetch + fast-forward every workspace repo; never merges, never discards
-  [ "$1" = cluster ] && { sync_cluster; return; }
+  [ "$1" = cluster ] && { sync_cluster "$2"; return; }
   local r d b up ahead behind dirty rc=0
   for r in $WS_REPOS; do d="$WORKSPACE/$r"; [ -d "$d/.git" ] || { fail "sync $r missing -> rerun bootstrap"; rc=1; continue; }
     to 120 git -C "$d" fetch -q --prune origin 2>/dev/null || { fail "sync $r fetch failed (network/auth) -> retry later or mtd ask"; rc=1; continue; }
