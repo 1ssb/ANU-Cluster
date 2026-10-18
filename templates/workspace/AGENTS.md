@@ -34,6 +34,17 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
 6. Take a lock for anything shared: `mtd lock acquire <name> --ttl <min>`.
    Use names like `paper`, `data-<x>`, `hssd-render`, `cluster-submit`.
 
+### Where you run decides what you can reach
+- **Local session on the Mac** (Claude desktop app → Code tab on this folder,
+  or a terminal agent): full portal. You reach rudra and the cluster with the
+  PI's keys, and you doctor problems yourself (`mtd doctor`, `mtd setup`). If
+  a password or OTP is needed, ask the PI to run `mtd login <host>` in
+  Terminal. Never ask for the password itself.
+- **Sandboxed agent** (no route: `mtd doctor` shows every host unreachable and
+  `~/.ssh` is not yours): work on the files in this folder only. Put remote
+  steps in the handoff's next steps, or `mtd ask` for a local session to run
+  them.
+
 ## 2. What you may do
 | allowed without asking | ask the PI first (then pass `--approved "<PI's words + time>"`) | never |
 |---|---|---|

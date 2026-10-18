@@ -5,12 +5,19 @@ Copilot, …) at **`~/Desktop/MatterDoor`**. It reads `AGENTS.md`, runs `mtd`,
 and knows everything else from there.
 
 ## Start an agent
-- **Claude desktop / Cowork:** add the folder `~/Desktop/MatterDoor` to the
-  chat, then say what you want. The agent's first command is `mtd`.
-- **From Terminal:** `mtd agent claude "task"` or `mtd agent codex "task"`.
-  This starts that CLI here, already briefed.
-- **Any other agent:** tell it "Read `~/Desktop/MatterDoor/AGENTS.md` and
-  follow it."
+- **Best: a local session.** In the Claude desktop app, open the **Code**
+  tab and choose the folder `~/Desktop/MatterDoor`.
+  - It runs on this Mac with your SSH keys and network, so it can reach rudra
+    and the cluster.
+  - It can run `mtd doctor` and `mtd setup` and fix problems itself.
+  - If a password is ever needed, it asks you to run `mtd login rudra` or
+    `mtd login cluster` in Terminal, and you type the password there.
+- **Terminal:** `mtd agent claude "task"`, if the Claude Code command-line
+  tool is installed (see code.claude.com).
+- **Sandboxed chats (e.g. Cowork) and any other agent:** tell it "Read
+  `~/Desktop/MatterDoor/AGENTS.md` and follow it." Sandboxed chats cannot
+  reach rudra or the cluster, so they work on files here and hand remote steps
+  to a local session.
 
 ## What is where
 | folder | GitHub | what |
