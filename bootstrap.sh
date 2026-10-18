@@ -41,12 +41,12 @@ clone() { # NAME BRANCH-IF-PRESENT
   if command -v git-lfs >/dev/null; then git -C "$WS/$r" lfs install --local >/dev/null 2>&1
     git -C "$WS/$r" lfs pull >/dev/null 2>&1 && say "+ $r LFS files fetched" || say "! $r: some LFS files not fetched (non-fatal; later: git -C $WS/$r lfs pull)"; fi
 }
-clone into_the_unknown matterdoor-control-plane || true
+clone into_the_unknown matterdoor-fork-benchmark || true   # the working branch (control plane merged in)
 clone into_the_unknown_paper "" || true
 [ -d "$WS/into_the_unknown/control/hooks" ] && git -C "$WS/into_the_unknown" config core.hooksPath control/hooks && say "+ project guards active (pre-commit / pre-push)"
 
 # 4. workspace root files (always refreshed from the portal's templates)
-cp "$PORTAL/templates/workspace/AGENTS.md" "$PORTAL/templates/workspace/README.md" "$PORTAL/templates/workspace/CLAUDE.md" "$WS/"
+cp "$PORTAL/templates/workspace/START_HERE.md" "$PORTAL/templates/workspace/AGENTS.md" "$PORTAL/templates/workspace/README.md" "$PORTAL/templates/workspace/CLAUDE.md" "$WS/"
 cp "$PORTAL/templates/workspace/data.README.md" "$WS/data/README.md"
 say "+ workspace AGENTS.md / README.md / CLAUDE.md written"
 

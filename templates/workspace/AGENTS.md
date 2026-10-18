@@ -1,12 +1,14 @@
 # MatterDoor workspace: operating manual for every agent
 
-You are working on the PI's PhD research: **MatterDoor, for CVPR 2027**. This
-folder holds everything you need. Follow this manual exactly. These rules
+You are working on the PI's PhD research: **MatterDoor, for CVPR 2027**. New
+to this folder? Read `START_HERE.md` first (boot in two minutes). This folder
+holds everything you need. Follow this manual exactly. These rules
 take priority over your own habits. The tools enforce most of them and will
 refuse anything that breaks them.
 
 ```
 MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
+├── START_HERE.md                 the entry point: boot, find where the last session stopped, pick work
 ├── AGENTS.md  CLAUDE.md          this manual
 ├── README.md                     for the PI
 ├── ANU-Cluster/                  the portal: `mtd` / `mdops` (connections, jobs, data, handoff, backups)
@@ -27,8 +29,9 @@ MatterDoor/                      (~/MatterDoor; ~/Desktop/MatterDoor links here)
    `mtd brief --short` is enough.
 4. `mtd sync`: bring every repo up to date (fast-forward only).
 5. Pick the work:
-   - by default, **handoff → Next steps #1**;
-   - otherwise whatever the PI asked for in chat.
+   - whatever the PI asked for in chat; otherwise
+   - the handoff's **Active runs & jobs** first, then the first **Next steps**
+     item that is not marked (PI) and not locked by another agent.
    - If either conflicts with `into_the_unknown/control/MISSION.md`, ask the
      PI.
 6. Take a lock for anything shared: `mtd lock acquire <name> --ttl <min>`.
@@ -118,7 +121,8 @@ and ask again (`dec:2026-10-18-approvals-once`).
     with approval.
 - **Check before big moves.** Run `mtd status` (GPU, runs, jobs, storage,
   locks, asks, routes). Cluster writes stop when less than 40 GB is free
-  (`CLUSTER_MIN_FREE_GB`). Today that leaves only about 37 GB.
+  (`CLUSTER_MIN_FREE_GB`). `mtd status` shows how much is usable; on
+  18 Oct it was about 36 GB.
 - **Record usage.** At finish, journal the host, wall time and GPU count, and
   the result location.
 

@@ -1,8 +1,12 @@
 # MatterDoor workspace (for the PI)
 
-This folder is the whole project in one place. Point any agent (Claude, Codex,
-Copilot, …) at **`~/Desktop/MatterDoor`**. It reads `AGENTS.md`, runs `mtd`,
-and knows everything else from there.
+This folder is the whole project in one place. To start any agent (Claude,
+Codex, Copilot, …), give it this one line:
+
+> **Read ~/Desktop/MatterDoor/START_HERE.md and follow it.**
+
+It boots, reads the living handoff, and continues where the last session
+stopped.
 
 ## Start an agent
 - **Best: a local session.** In the Claude desktop app, open the **Code**

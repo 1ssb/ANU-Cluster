@@ -695,7 +695,7 @@ cmd_sync() { # fetch + fast-forward every workspace repo; never merges, never di
   done
   # the workspace manual is a generated copy of the portal templates: keep it current (a local edit is backed up, never lost)
   local f n=0 bk="$WORKSPACE/scratch/manual-backups"
-  for f in AGENTS.md README.md CLAUDE.md; do [ -f "$ROOT/templates/workspace/$f" ] || continue
+  for f in START_HERE.md AGENTS.md README.md CLAUDE.md; do [ -f "$ROOT/templates/workspace/$f" ] || continue
     cmp -s "$ROOT/templates/workspace/$f" "$WORKSPACE/$f" && continue
     [ -f "$WORKSPACE/$f" ] && { mkdir -p "$bk"; cp "$WORKSPACE/$f" "$bk/$f.$(date +%Y%m%d-%H%M%S)"; }
     cp "$ROOT/templates/workspace/$f" "$WORKSPACE/$f" && n=$((n+1)); done

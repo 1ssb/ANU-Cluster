@@ -1,1 +1,2 @@
+@START_HERE.md
 @AGENTS.md
